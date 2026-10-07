@@ -1,0 +1,1144 @@
+/**
+ * @file megasynth.js
+ * 実行環境: Browser（メインスレッド）
+ * 依存: 音声初期化・再生時に AudioContext / AudioWorkletNode と WASM アセットが必要。
+ * import だけでは音声デバイスを開かない。アセット読み込みには fetch を使用する。
+ */
+import {
+  MegaSynthRecordingManager,
+} from "./megasynth_recording.js";
+import {
+  YM2612Synth,
+  YM2612WorkletTransport,
+} from "./ym2612synth.js";
+import { YM2612_CLOCK } from "./ym2612.js";
+import { createSegaPsgApi } from "./segapsg_api.js";
+import { createRf5c164Audio } from "./playground_rf5c164_audio.js";
+import { createRf5c164Client } from "./playground_rf5c164.js";
+import { samplePCM } from "./native_sample.js";
+import { TetoricaAudioRuntime } from "./tetorica_audio_runtime.js?v=native-fx-1";
+export {
+  createFXBranch,
+  createBitcrusherFX,
+  createChorusFX,
+  createFXParallel,
+  createDelayFX,
+  createEqFX,
+  createFilterFX,
+  createGainFX,
+  createLofiFX,
+  createRadioToneFX,
+  createReverbFX,
+  createSlicerFX,
+  createStereoWidthFX,
+  createTapeSaturationFX,
+} from "./megasynth_fx.js";
+export { MegaSynthLooper } from "./looper.js";
+export {
+  FM_PRESETS,
+  FM_PRESET_ORDER,
+} from "./megasynth-fm-presets.js";
+
+// YM2612 outputs one mixed sample every 144 master clocks.
+// Keep its clock domain intact and let Web Audio resample for the device.
+const YM2612_NATIVE_SAMPLE_RATE =
+  Math.floor(YM2612_CLOCK / 144);
+
+/**
+ * @typedef {import("./megasynth_fx.js").AnyFXUnit} AnyFXUnit
+ * @typedef {import("./ym2612synth.js").YM2612Synth} YM2612Synth
+ * @typedef {import("./ym2612synth.js").YM2612Transport} YM2612Transport
+ */
+
+/**
+ * @typedef {{
+ *   gain?: number,
+ *   playbackRate?: number,
+ *   offset?: number,
+ *   duration?: number,
+ *   loop?: boolean,
+ *   loopStart?: number,
+ *   loopEnd?: number,
+ *   fadeIn?: number,
+ *   fadeOut?: number,
+ *   pan?: number,
+ * }} MegaSynthSamplePlayOptions
+ */
+
+/**
+ * @typedef {{
+ *   name: string,
+ *   source: AudioBufferSourceNode,
+ *   gainNode: GainNode,
+ *   pannerNode: StereoPannerNode | GainNode,
+ *   stop(): void,
+ * }} MegaSynthSampleVoice
+ */
+
+/**
+ * @typedef {{
+ *   load(name: string, source: string | ArrayBuffer | AudioBuffer): Promise<AudioBuffer>,
+ *   play(name: string, options?: MegaSynthSamplePlayOptions): MegaSynthSampleVoice | Promise<MegaSynthSampleVoice>,
+ *   stop(name?: string): void,
+ *   stopAll(): void,
+ *   unload(name: string): boolean,
+ *   isLoaded(name: string): boolean,
+ *   get(name: string): AudioBuffer | null,
+ *   list(): string[],
+ * }} MegaSynthSampleAPI
+ */
+
+/**
+ * @typedef {{
+ *   gain?: number,
+ *   playbackRate?: number,
+ *   offset?: number,
+ *   loop?: boolean,
+ *   fadeIn?: number,
+ *   fadeOut?: number,
+ *   pan?: number,
+ * }} MegaSynthStreamPlayOptions
+ */
+
+/**
+ * @typedef {{
+ *   name: string,
+ *   element: HTMLAudioElement,
+ *   sourceNode: MediaElementAudioSourceNode,
+ *   gainNode: GainNode,
+ *   pannerNode: StereoPannerNode | GainNode,
+ *   play(options?: MegaSynthStreamPlayOptions): Promise<void>,
+ *   pause(): void,
+ *   stop(): void,
+ * }} MegaSynthStreamEntry
+ */
+
+/**
+ * @typedef {{
+ *   load(name: string, url: string): Promise<MegaSynthStreamEntry>,
+ *   play(name: string, options?: MegaSynthStreamPlayOptions): Promise<MegaSynthStreamEntry>,
+ *   pause(name?: string): void,
+ *   stop(name?: string): void,
+ *   unload(name: string): boolean,
+ *   isLoaded(name: string): boolean,
+ *   get(name: string): MegaSynthStreamEntry | null,
+ *   list(): string[],
+ * }} MegaSynthStreamAPI
+ */
+
+/**
+ * @typedef {{
+ *   audioContext?: AudioContext | null,
+ *   outputNode?: AudioNode | null,
+ *   workletUrl?: string,
+ *   stereoWidthWorkletUrl?: string,
+ *   bitcrusherWorkletUrl?: string,
+ *   ym2612WasmUrl?: string,
+ *   segaPsgWasmUrl?: string | null,
+ *   megaCD?: boolean,
+ *   rf5c164WasmUrl?: string,
+ *   rf5c164WorkletUrl?: string,
+ *   rf5c164Fetch?: typeof fetch,
+ *   chipSampleRate?: number,
+ *   masterVolume?: number,
+ *   sampleOutputNode?: AudioNode | null,
+ * }} MegaSynthOptions
+ */
+
+/**
+ * @param {string} workletUrl
+ * @param {string} siblingName
+ * @returns {string}
+ */
+function resolveSiblingWorkletUrl(
+  workletUrl,
+  siblingName
+) {
+  const lastSlash =
+    String(workletUrl).lastIndexOf("/");
+
+  if (lastSlash < 0) {
+    return `./${siblingName}`;
+  }
+
+  return (
+    String(workletUrl).slice(
+      0,
+      lastSlash + 1
+    ) + siblingName
+  );
+}
+
+/**
+ * @typedef {{
+ *   dispose?: boolean,
+ * }} FXChainOptions
+ */
+
+/**
+ * @typedef {{
+ *   type: "reset",
+ * } | {
+ *   type: "setPreset",
+ *   channel: number,
+ *   preset: object,
+ * } | {
+ *   type: "setOperator",
+ *   channel: number,
+ *   operator: number,
+ *   params: object,
+ * } | {
+ *   type: "setAlgo",
+ *   channel: number,
+ *   algorithm: number,
+ *   feedback: number,
+ * } | {
+ *   type: "setPan",
+ *   channel: number,
+ *   left: boolean,
+ *   right: boolean,
+ * } | {
+ *   type: "setChannel3SpecialMode",
+ *   enabled: boolean,
+ * } | {
+ *   type: "setChannel3SpecialFrequency",
+ *   operator: number,
+ *   block: number,
+ *   fnum: number,
+ * } | {
+ *   type: "setDacEnabled",
+ *   enabled: boolean,
+ * } | {
+ *   type: "writeDac",
+ *   value: number,
+ * } | {
+ *   type: "noteOn",
+ *   channel: number,
+ *   block: number,
+ *   fnum: number,
+ * } | {
+ *   type: "noteOff",
+ *   channel: number,
+ * } | {
+ *   type: "setMasterVolume",
+ *   volume: number,
+ * }} MegaSynthEvent
+ */
+
+/**
+ * @callback MegaSynthListener
+ * @param {MegaSynthEvent} event
+ * @returns {void}
+ */
+
+/**
+ * Browser-side Mega / Genesis-oriented synth runtime.
+ *
+ * This class hides:
+ *
+ * - AudioContext
+ * - AudioWorkletNode
+ * - YM2612 WASM loading
+ * - AudioWorklet initialization
+ *
+ * The YM2612 control API itself is exposed through `fm`.
+ *
+ * Future:
+ *
+ * - Sega PSG
+ * - DAC helpers
+ * - sample-timed scheduling
+ * - VGM playback
+ */
+export class MegaSynth {
+  /**
+   * @param {MegaSynthOptions} [options]
+   */
+  constructor(options = {}) {
+    this.audio = new TetoricaAudioRuntime({
+      audioContext: options.audioContext,
+      outputNode: options.outputNode,
+      sampleOutputNode: options.sampleOutputNode,
+      masterVolume: clampMasterVolume(options.masterVolume ?? 1),
+    });
+    for (const property of [
+      "ownsAudioContext",
+      "audioContext",
+      "outputNode",
+      "sampleOutputNode",
+      "masterVolume",
+      "masterInputNode",
+      "masterOutputNode",
+      "fxChain",
+      "sampleBuffers",
+      "sampleVoices",
+      "streamEntries",
+      "noiseVoices",
+      "audioHandles",
+    ]) {
+      Object.defineProperty(this, property, {
+        configurable: true,
+        get: () => this.audio[property],
+        set: (value) => { this.audio[property] = value; },
+      });
+    }
+
+    this.workletUrl =
+      options.workletUrl ?? "./js/ym2612-worklet.js";
+    this.stereoWidthWorkletUrl =
+      options.stereoWidthWorkletUrl ??
+      resolveSiblingWorkletUrl(
+        this.workletUrl,
+        "stereo-width-worklet.js"
+      );
+    this.bitcrusherWorkletUrl =
+      options.bitcrusherWorkletUrl ??
+      resolveSiblingWorkletUrl(
+        this.workletUrl,
+        "bitcrusher-worklet.js"
+      );
+
+    this.ym2612WasmUrl =
+      options.ym2612WasmUrl ?? "./generated/ym2612_wasm.wasm";
+    this.chipSampleRate = clampChipSampleRate(
+      options.chipSampleRate ??
+        YM2612_NATIVE_SAMPLE_RATE
+    );
+
+    /**
+     * Optional. When set, the worklet also loads a Sega PSG core and mixes
+     * it with the YM2612 output, exposed on `this.psg`. Left unset by
+     * default except in Mega CD mode, so FM-only callers are unaffected.
+     */
+    this.megaCD = options.megaCD === true;
+    this.segaPsgWasmUrl = options.segaPsgWasmUrl !== undefined
+      ? options.segaPsgWasmUrl
+      : this.megaCD ? resolveSiblingWorkletUrl(this.ym2612WasmUrl, 'segapsg_wasm.wasm') : null;
+    this.rf5c164WasmUrl = options.rf5c164WasmUrl ??
+      resolveSiblingWorkletUrl(this.ym2612WasmUrl, 'rf5c164_wasm.wasm');
+    this.rf5c164WorkletUrl = options.rf5c164WorkletUrl ??
+      resolveSiblingWorkletUrl(this.workletUrl, 'rf5c164-worklet.js');
+    this.rf5c164Fetch = options.rf5c164Fetch;
+    /** RF5C164 API after start() when megaCD is enabled; its methods return promises. */
+    this.pcm = null;
+    this.pcmDevice = null;
+    this.pcmDecodeId = 0;
+
+    this.node = null;
+    this.recordingManager = null;
+    this._recordingHooksInstalled =
+      false;
+    this.listeners = new Set();
+
+    /** @type {YM2612Synth | null} */
+    this.fm = null;
+
+    /** @type {{ write(value: number): void, reset(): void } | null} */
+    this.psg = null;
+
+    /** @type {MegaSynthSampleAPI} */
+    this.audio.setMediaApis(
+      this.audio.createSampleApi({
+        createAudioContext: () =>
+          this.#createAudioContext(),
+      }),
+      this.audio.createStreamApi({
+        createAudioContext: () =>
+          this.#createAudioContext(),
+        resume: () =>
+          this.resume(),
+      })
+    );
+    this.noise = this.audio.createNoiseApi();
+
+    /** @type {Promise<void> | null} */
+    this.readyPromise = null;
+    this.closePromise = null;
+    this.initializationController = null;
+    /** @type {"idle" | "starting" | "ready" | "error" | "closed"} */
+    this.state = "idle";
+  }
+
+  /**
+   * Initialize and start the browser audio runtime.
+   *
+   * This should normally be called from a user gesture such as
+   * a click, pointerdown, or keydown event.
+   *
+   * Calling close() during initialization rejects start() with AbortError.
+   *
+   * @returns {Promise<MegaSynth>}
+   */
+  async start() {
+    if (this.closePromise) await this.closePromise;
+    if (this.readyPromise) {
+      await this.readyPromise;
+      await this.resume();
+      return this;
+    }
+
+    const controller = new AbortController();
+    this.initializationController = controller;
+    this.state = "starting";
+    this.readyPromise = (async () => {
+      try {
+        await this.#initialize(controller.signal);
+        controller.signal.throwIfAborted();
+        this.state = "ready";
+      } catch (error) {
+        if (this.initializationController === controller) {
+          controller.abort();
+          this.#disposePcm();
+          this.fm?.transport?.dispose?.();
+          this.node?.disconnect();
+          this.node?.port.close();
+          this.node = null;
+          this.fm = null;
+          this.psg = null;
+          this.readyPromise = null;
+          this.state = "error";
+        }
+        throw error;
+      }
+    })();
+    await this.readyPromise;
+    return this;
+  }
+
+  get sample() {
+    return this.audio.sample;
+  }
+
+  get stream() {
+    return this.audio.stream;
+  }
+
+  /**
+   * @returns {Promise<void>}
+   */
+  async resume() {
+    if (
+      this.audioContext &&
+      this.audioContext.state !== "running"
+    ) {
+      await this.audioContext.resume();
+    }
+  }
+
+  /**
+   * @returns {Promise<void>}
+   */
+  async suspend() {
+    if (
+      this.audioContext &&
+      this.audioContext.state === "running"
+    ) {
+      await this.audioContext.suspend();
+    }
+  }
+
+  /**
+   * @returns {Promise<void>|undefined} Await to also reset Mega CD PCM.
+   */
+  reset() {
+    this.fm?.reset();
+    return this.pcm?.reset();
+  }
+
+  /**
+   * Subscribe to high-level FM actions coming from `fm`.
+   *
+   * This stays on `MegaSynth` so UI/demo sync logic does not have to live
+   * inside the lower-level `YM2612Synth`.
+   *
+   * @param {MegaSynthListener} listener
+   * @returns {() => void}
+   */
+  addListener(listener) {
+    if (typeof listener !== "function") {
+      throw new Error(
+        "listener must be a function"
+      );
+    }
+
+    this.listeners.add(listener);
+    return () => {
+      this.removeListener(listener);
+    };
+  }
+
+  /**
+   * @param {MegaSynthListener} listener
+   * @returns {void}
+   */
+  removeListener(listener) {
+    this.listeners.delete(listener);
+  }
+
+  /**
+   * @param {AnyFXUnit[]} [effects]
+   * @param {FXChainOptions} [options]
+   * @returns {void}
+   */
+  setFXChain(
+    effects = [],
+    options = {}
+  ) {
+    this.audio.setFXChain(effects, options);
+  }
+
+  /**
+   * @returns {AnyFXUnit[]}
+   */
+  getFXChain() {
+    return this.audio.getFXChain();
+  }
+
+  /**
+   * @param {AnyFXUnit} effect
+   * @returns {MegaSynth}
+   */
+  connect(effect) {
+    this.audio.connect(effect);
+
+    return this;
+  }
+
+  /**
+   * @param {FXChainOptions} [options]
+   * @returns {AnyFXUnit[]}
+   */
+  clearFXChain(options = {}) {
+    return this.audio.clearFXChain(options);
+  }
+
+  /**
+   * @param {AudioNode | null} [node]
+   * @returns {MegaSynth}
+   */
+  connectOutput(node = null) {
+    this.audio.connectOutput(node);
+
+    return this;
+  }
+
+  /**
+   * Set the final browser-side output gain after the current FX chain.
+   *
+   * This is not a YM2612 register write. It scales the mixed output at the
+   * Web Audio level.
+   *
+   * @param {number} volume
+   * @returns {number}
+   */
+  setMasterVolume(volume) {
+    const nextVolume =
+      clampMasterVolume(volume);
+    this.audio.setMasterVolume(nextVolume);
+
+    this.#emit({
+      type: "setMasterVolume",
+      volume: nextVolume,
+    });
+
+    return nextVolume;
+  }
+
+  /**
+   * @returns {number}
+   */
+  getMasterVolume() {
+    return this.masterVolume;
+  }
+
+  /**
+   * @returns {*}
+   */
+  startRecord() {
+    this.#ensureRecordingManager();
+    return this.recordingManager.start();
+  }
+
+  /**
+   * @returns {*}
+   */
+  stopRecord() {
+    this.#ensureRecordingManager();
+    return this.recordingManager.stop();
+  }
+
+  /**
+   * @returns {*}
+   */
+  exportRecording() {
+    this.#ensureRecordingManager();
+    return this.recordingManager.exportRecording();
+  }
+
+  /**
+   * @param {*} recording
+   * @returns {*}
+   */
+  importRecording(recording) {
+    this.#ensureRecordingManager();
+    return this.recordingManager.importRecording(
+      recording
+    );
+  }
+
+  /**
+   * @param {*} [recording=null]
+   * @param {object} [options={}]
+   * @returns {*}
+   */
+  playRecording(recording = null, options = {}) {
+    this.#ensureRecordingManager();
+    return this.recordingManager.play(
+      recording,
+      options
+    );
+  }
+
+  /**
+   * @returns {void}
+   */
+  stopRecordingPlayback() {
+    this.#ensureRecordingManager();
+    this.recordingManager.stopPlayback();
+  }
+
+  /**
+   * @returns {boolean}
+   */
+  isRecording() {
+    return (
+      this.recordingManager?.isRecording() ??
+      false
+    );
+  }
+
+  /**
+   * @returns {boolean}
+   */
+  isRecordingPlaybackActive() {
+    return (
+      this.recordingManager?.isPlaying() ??
+      false
+    );
+  }
+
+  /**
+   * @returns {Promise<void>}
+   */
+  close() {
+    if (this.closePromise) return this.closePromise;
+    this.initializationController?.abort();
+    this.initializationController = null;
+    this.readyPromise = null;
+    const closing = this.#close();
+    this.closePromise = closing;
+    closing.finally(() => {
+      if (this.closePromise === closing) this.closePromise = null;
+    }).catch(() => {});
+    return closing;
+  }
+
+  async #close() {
+    this.recordingManager?.stop();
+    this.recordingManager?.stopPlayback();
+    this.recordingManager?.attachSynth(null);
+    this.audio.closeMedia();
+    this.audio.disposeFXChain();
+    this.#disposePcm();
+
+    this.fm?.transport?.dispose?.();
+    if (this.node) {
+      this.node.disconnect();
+      this.node.port.close();
+      this.node = null;
+    }
+
+    this.audio.disconnectRouting();
+    this.masterInputNode = null;
+    this.masterOutputNode = null;
+
+    this.fm = null;
+    this.psg = null;
+    this._recordingHooksInstalled =
+      false;
+    this.readyPromise = null;
+    this.state = "closed";
+
+    if (
+      this.audioContext &&
+      this.ownsAudioContext
+    ) {
+      await this.audioContext.close();
+      this.audioContext = null;
+    }
+  }
+
+  /**
+   * @returns {boolean}
+   */
+  isReady() {
+    return this.state === "ready" && !!this.fm;
+  }
+
+  /**
+   * @returns {boolean}
+   */
+  isStarting() {
+    return this.state === "starting";
+  }
+
+  #createAudioContext() {
+    return new AudioContext({
+      sampleRate: this.chipSampleRate,
+    });
+  }
+
+  async #initialize(signal) {
+    if (!this.audioContext) {
+      this.audioContext = this.#createAudioContext();
+    }
+
+    if (this.audioContext.state !== "running") {
+      await waitForInitialization(this.audioContext.resume(), signal);
+    }
+
+    await waitForInitialization(this.audioContext.audioWorklet.addModule(
+      this.workletUrl
+    ), signal);
+    if (
+      this.stereoWidthWorkletUrl &&
+      this.audioContext.audioWorklet
+    ) {
+      try {
+        await waitForInitialization(this.audioContext.audioWorklet.addModule(
+          this.stereoWidthWorkletUrl
+        ), signal);
+      } catch (error) {
+        signal.throwIfAborted();
+        console.warn(
+          "Stereo width worklet load failed; falling back to built-in stereo width routing if needed.",
+          error
+        );
+      }
+    }
+    if (
+      this.bitcrusherWorkletUrl &&
+      this.audioContext.audioWorklet
+    ) {
+      try {
+        await waitForInitialization(this.audioContext.audioWorklet.addModule(
+          this.bitcrusherWorkletUrl
+        ), signal);
+      } catch (error) {
+        signal.throwIfAborted();
+        console.warn(
+          "Bitcrusher worklet load failed; fx.bitcrusher() will be unavailable.",
+          error
+        );
+      }
+    }
+
+    const response = await waitForInitialization(fetch(
+      this.ym2612WasmUrl, { signal }
+    ), signal);
+
+    if (!response.ok) {
+      throw new Error(
+        `Failed to load YM2612 WASM: ${response.status} ${response.statusText}`
+      );
+    }
+
+    const wasmBinary =
+      await waitForInitialization(response.arrayBuffer(), signal);
+
+    let psgWasmBinary = null;
+    if (this.segaPsgWasmUrl) {
+      const psgResponse = await waitForInitialization(fetch(
+        this.segaPsgWasmUrl, { signal }
+      ), signal);
+
+      if (!psgResponse.ok) {
+        throw new Error(
+          `Failed to load Sega PSG WASM: ${psgResponse.status} ${psgResponse.statusText}`
+        );
+      }
+
+      psgWasmBinary =
+        await waitForInitialization(psgResponse.arrayBuffer(), signal);
+    }
+
+    signal.throwIfAborted();
+    this.node =
+      new AudioWorkletNode(
+        this.audioContext,
+        "ym2612-processor",
+        {
+          numberOfInputs: 0,
+          numberOfOutputs: 1,
+          outputChannelCount: [2],
+        }
+      );
+
+    this.audio.ensureRouting(this.audioContext);
+    this.audio.connectChipOutput(this.node);
+
+    const workletReady =
+      this.#waitForWorkletReady(this.node, signal);
+    workletReady.catch(() => {});
+
+    const transferList = [wasmBinary];
+    if (psgWasmBinary) {
+      transferList.push(psgWasmBinary);
+    }
+
+    this.node.port.postMessage(
+      {
+        type: "initialize",
+        wasmBinary,
+        psgWasmBinary,
+      },
+      transferList
+    );
+
+    await workletReady;
+    signal.throwIfAborted();
+
+    const transport =
+      new YM2612WorkletTransport(
+        this.node
+      );
+
+    this.fm =
+      new YM2612Synth({
+        transport,
+      });
+
+    if (psgWasmBinary) {
+      const node = this.node;
+      this.psg = createSegaPsgApi({
+        write(value) {
+          node.port.postMessage({
+            type: "psg-write",
+            value,
+          });
+        },
+        reset() {
+          node.port.postMessage({
+            type: "psg-reset",
+          });
+        },
+        resetAll() {
+          node.port.postMessage({
+            type: "reset",
+          });
+        },
+      });
+    }
+
+    if (this.megaCD) {
+      const device = await createRf5c164Audio(this.audioContext, this.masterInputNode, {
+        wasmUrl: this.rf5c164WasmUrl, workletUrl: this.rf5c164WorkletUrl,
+        fetch: this.rf5c164Fetch, signal,
+      });
+      if (signal.aborted) { device.dispose(); signal.throwIfAborted(); }
+      this.pcmDevice = device;
+      this.pcm = createRf5c164Client(device.port, async source => {
+        signal.throwIfAborted();
+        if (source?.channels && source.sampleRate) return source;
+        if (source instanceof Uint8Array) source = source.buffer.slice(source.byteOffset, source.byteOffset + source.byteLength);
+        if (typeof Blob !== 'undefined' && source instanceof Blob) source = await source.arrayBuffer();
+        signal.throwIfAborted();
+        const name = '__megasynth_rf5c164_decode_' + (++this.pcmDecodeId);
+        try {
+          const buffer = await this.sample.load(name, source);
+          signal.throwIfAborted();
+          return samplePCM(buffer);
+        }
+        finally { this.sample.unload(name); }
+      });
+    }
+    this.#ensureRecordingManager();
+    this.#installRecordingHooks();
+  }
+
+  #disposePcm() {
+    this.pcm?.dispose();
+    this.pcm = null;
+    this.pcmDevice?.dispose();
+    this.pcmDevice = null;
+  }
+
+  #waitForWorkletReady(node, signal) {
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        node.port.removeEventListener("message", handleMessage);
+        signal.removeEventListener("abort", onAbort);
+      };
+      const onAbort = () => { cleanup(); reject(signal.reason); };
+      const handleMessage = ({ data: message }) => {
+        if (message?.type !== "ready" && message?.type !== "error") return;
+        cleanup();
+        if (message.type === "ready") resolve(message);
+        else reject(new Error(message.message || "MegaSynth AudioWorklet initialization failed"));
+      };
+      node.port.addEventListener("message", handleMessage);
+      signal.addEventListener("abort", onAbort, { once: true });
+      node.port.start();
+      if (signal.aborted) onAbort();
+    });
+  }
+
+  #ensureRecordingManager() {
+    if (!this.recordingManager) {
+      this.recordingManager =
+        new MegaSynthRecordingManager({
+          synth: this.fm,
+          now: () =>
+            this.audioContext
+              ? this.audioContext.currentTime
+              : performance.now() /
+                  1000,
+        });
+      return;
+    }
+
+    if (this.fm) {
+      this.recordingManager.attachSynth(
+        this.fm
+      );
+    }
+  }
+
+  #installRecordingHooks() {
+    if (
+      this._recordingHooksInstalled ||
+      !this.fm
+    ) {
+      return;
+    }
+
+    this.#wrapFmMethod(
+      "reset",
+      () => ({
+        type: "reset",
+      })
+    );
+    this.#wrapFmMethod(
+      "setPreset",
+      (channel, preset) => ({
+        type: "setPreset",
+        channel,
+        preset,
+      }),
+      {
+        record: false,
+      }
+    );
+    this.#wrapFmMethod(
+      "setOperator",
+      (channel, operator, params) => ({
+        type: "setOperator",
+        channel,
+        operator,
+        params,
+      })
+    );
+    this.#wrapFmMethod(
+      "setAlgo",
+      (
+        channel,
+        algorithm,
+        feedback = 0
+      ) => ({
+        type: "setAlgo",
+        channel,
+        algorithm,
+        feedback,
+      })
+    );
+    this.#wrapFmMethod(
+      "setLfo",
+      (enabled, frequency) => ({
+        type: "setLfo",
+        enabled,
+        frequency,
+      })
+    );
+    this.#wrapFmMethod(
+      "setPan",
+      (
+        channel,
+        left,
+        right,
+        ams = undefined,
+        pms = undefined
+      ) => ({
+        type: "setPan",
+        channel,
+        left,
+        right,
+        ams,
+        pms,
+      })
+    );
+    this.#wrapFmMethod(
+      "setChannel3SpecialMode",
+      (enabled) => ({
+        type: "setChannel3SpecialMode",
+        enabled,
+      })
+    );
+    this.#wrapFmMethod(
+      "setChannel3SpecialFrequency",
+      (operator, block, fnum) => ({
+        type: "setChannel3SpecialFrequency",
+        operator,
+        block,
+        fnum,
+      })
+    );
+    this.#wrapFmMethod(
+      "setDacEnabled",
+      (enabled) => ({
+        type: "setDacEnabled",
+        enabled,
+      })
+    );
+    this.#wrapFmMethod(
+      "writeDac",
+      (value) => ({
+        type: "writeDac",
+        value,
+      })
+    );
+    this.#wrapFmMethod(
+      "noteOn",
+      (channel, block, fnum) => ({
+        type: "noteOn",
+        channel,
+        block,
+        fnum,
+      })
+    );
+    this.#wrapFmMethod(
+      "noteOff",
+      (channel) => ({
+        type: "noteOff",
+        channel,
+      })
+    );
+
+    this._recordingHooksInstalled =
+      true;
+  }
+
+  #wrapFmMethod(
+    methodName,
+    toCommand,
+    options = {}
+  ) {
+    const originalMethod =
+      this.fm?.[methodName];
+
+    if (typeof originalMethod !== "function") {
+      return;
+    }
+
+    const synth = this.fm;
+    this.fm[methodName] = (
+      ...args
+    ) => {
+      const event =
+        toCommand(...args);
+      const result =
+        originalMethod.apply(
+          synth,
+          args
+        );
+
+      if (options.record !== false) {
+        this.recordingManager?.recordCommand(
+          event
+        );
+      }
+
+      if (options.emit !== false) {
+        this.#emit(event);
+      }
+      return result;
+    };
+  }
+
+  /**
+   * @param {MegaSynthEvent} event
+   * @returns {void}
+   */
+  #emit(event) {
+    for (const listener of this.listeners) {
+      try {
+        listener(event);
+      } catch (error) {
+        console.error(
+          "MegaSynth listener failed",
+          error
+        );
+      }
+    }
+  }
+}
+
+// Backward-compatible alias.
+// Keep this so older downloads and examples that still refer to
+// `MegaDriveSynth` continue to work.
+export const MegaDriveSynth = MegaSynth;
+
+const MAX_MASTER_VOLUME = 3.8;
+
+function clampMasterVolume(value) {
+  const numeric = Number(value);
+
+  if (!Number.isFinite(numeric)) {
+    throw new Error(
+      `master volume must be a finite number, got ${value}`
+    );
+  }
+
+  return Math.min(
+    MAX_MASTER_VOLUME,
+    Math.max(0, numeric)
+  );
+}
+
+function clampChipSampleRate(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    throw new Error(
+      `chipSampleRate must be a finite number, got ${value}`
+    );
+  }
+  return Math.max(8000, Math.round(numeric));
+}
+
+// addModule() and arrayBuffer() do not accept AbortSignal themselves.
+async function waitForInitialization(promise, signal) {
+  let onAbort;
+  try {
+    const result = await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        onAbort = () => reject(signal.reason);
+        signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) onAbort();
+      }),
+    ]);
+    signal.throwIfAborted();
+    return result;
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+}

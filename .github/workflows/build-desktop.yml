@@ -1,0 +1,89 @@
+name: Build Desktop
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    permissions:
+      contents: write # tauri-action attaches assets to the draft release on tags
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-arm64
+            runner: macos-14
+            bundles: dmg
+          - platform: macos-x86_64
+            runner: macos-15-intel
+            bundles: dmg
+          - platform: windows-x86_64
+            runner: windows-latest
+            bundles: nsis
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+            bundles: deb,appimage
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            bundles: deb,appimage
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@1.91.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ matrix.platform }}
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils
+      - run: npm ci
+      - run: npm test
+      - name: Verify committed Synth assets
+        run: python scripts/import_release.py --check
+      - name: Build desktop app
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: tauri-apps/tauri-action@v0
+        with:
+          args: --bundles ${{ matrix.bundles }} -- --locked
+      - name: Build and attach to draft release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: --bundles ${{ matrix.bundles }} -- --locked
+          tagName: ${{ github.ref_name }}
+          releaseName: Tetorica VGM Synth ${{ github.ref_name }}
+          releaseBody: Desktop builds of Tetorica VGM Synth. Unsigned builds; review before publishing.
+          releaseDraft: true
+          prerelease: false
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: tetorica-fm2612-synth-${{ matrix.platform }}
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/appimage/*.AppImage

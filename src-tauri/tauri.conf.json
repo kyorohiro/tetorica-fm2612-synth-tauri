@@ -1,0 +1,41 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Tetorica FM2612 Synth",
+  "version": "0.50.1",
+  "identifier": "net.tetorica.fm2612-synth",
+  "build": {
+    "frontendDist": "../dist",
+    "beforeDevCommand": "python3 scripts/import_release.py --check",
+    "beforeBuildCommand": "python3 scripts/import_release.py --check"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Tetorica FM2612 Synth",
+        "width": 1280,
+        "height": 900,
+        "dragDropEnabled": false
+      }
+    ],
+    "security": {
+      "csp": null,
+      "capabilities": []
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app"
+    ],
+    "category": "Music",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

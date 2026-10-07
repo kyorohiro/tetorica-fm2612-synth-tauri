@@ -1,0 +1,1276 @@
+import {YM2612Dac, YM2612DacPlayer} from "./ym2612_dac.js";
+/**
+ * @file ym2612synth.js
+ * 実行環境: Browser / Node.js
+ * 依存: 注入されたレジスタ transport。DirectTransport は Node.js でも使用可能。
+ * WorkletTransport はブラウザーの AudioWorkletNode（port）を受け取る。
+ */
+/**
+ * Thin YM2612 synth layer for browser/game usage.
+ *
+ * The goal of this file is not to hide the YM2612 too much.
+ * It should stay readable enough that someone can look at the code and see:
+ *
+ * - which YM2612 feature is being used
+ * - which register is written
+ * - how channel/operator numbers map to register addresses
+ *
+ * Public API channel numbers are 0..5.
+ * Public API operator numbers are 0..3.
+ */
+
+/**
+ * @typedef {{
+ *   write(port: number, register: number, value: number): void,
+ *   reset?: () => void,
+ *   read?: (offset: number) => number,
+ *   readStatus?: () => number,
+ *   getIrq?: () => boolean,
+ *   dacCommand?: (command: object) => void | Promise<void>,
+ * }} YM2612Transport
+ */
+
+/**
+ * @typedef {{
+ *   dt?: number,
+ *   multi?: number,
+ *   tl?: number,
+ *   rs?: number,
+ *   ar?: number,
+ *   am?: boolean,
+ *   d1r?: number,
+ *   sr?: number,
+ *   d2r?: number,
+ *   sl?: number,
+ *   rr?: number,
+ *   ssg?: number,
+ * }} YM2612OperatorParams
+ */
+
+/**
+ * @typedef {{
+ *   left?: boolean,
+ *   right?: boolean,
+ * }} YM2612PanParams
+ */
+
+/**
+ * @typedef {{
+ *   algorithm?: number,
+ *   feedback?: number,
+ *   ams?: number,
+ *   pms?: number,
+ *   pan?: YM2612PanParams,
+ *   operators?: [
+ *     YM2612OperatorParams?,
+ *     YM2612OperatorParams?,
+ *     YM2612OperatorParams?,
+ *     YM2612OperatorParams?
+ *   ],
+ * }} YM2612Preset
+ */
+
+/**
+ * @typedef {{
+ *   transport: YM2612Transport,
+ * }} YM2612SynthOptions
+ */
+
+const CHANNEL_COUNT = 6;
+const OPERATOR_COUNT = 4;
+const CHANNEL_3_INDEX = 2;
+
+// YM2612 packs channel numbers for key on/off a little differently.
+// Public channels:
+//   0 -> ch1
+//   1 -> ch2
+//   2 -> ch3
+//   3 -> ch4
+//   4 -> ch5
+//   5 -> ch6
+//
+// Key on/off register 0x28 uses:
+//   ch1=0x00 ch2=0x01 ch3=0x02 ch4=0x04 ch5=0x05 ch6=0x06
+const KEY_CHANNEL_CODES = [0x00, 0x01, 0x02, 0x04, 0x05, 0x06];
+
+// Key on/off register 0x28 operator bits:
+//   bit 4 = OP1
+//   bit 5 = OP2
+//   bit 6 = OP3
+//   bit 7 = OP4
+//
+// Public logical operators in this synth use:
+//   0 -> OP1
+//   1 -> OP2
+//   2 -> OP3
+//   3 -> OP4
+const KEY_OPERATOR_BITS = [0x10, 0x20, 0x40, 0x80];
+
+// Public operator numbers follow the logical YM2612 algorithm order:
+//   0->O1, 1->O2, 2->O3, 3->O4
+//
+// YM2612 register slots are laid out in a different physical order:
+//   0x30 -> O1
+//   0x34 -> O3
+//   0x38 -> O2
+//   0x3c -> O4
+//
+// The synth API hides that physical slot order so callers and preset data can
+// stay in logical operator order.
+const OPERATOR_SLOT_OFFSETS = {
+  0: 0x00,
+  1: 0x08,
+  2: 0x04,
+  3: 0x0c,
+};
+
+const DEFAULT_OPERATOR_STATE = Object.freeze({
+  dt: 0,
+  multi: 1,
+  tl: 0x7f,
+  rs: 0,
+  ar: 0,
+  am: false,
+  d1r: 0,
+  d2r: 0,
+  sl: 0,
+  rr: 15,
+  ssg: 0,
+});
+
+const DEFAULT_CHANNEL_STATE = Object.freeze({
+  algorithm: 7,
+  feedback: 0,
+  ams: 0,
+  pms: 0,
+  left: true,
+  right: true,
+  block: 4,
+  fnum: 0,
+});
+
+const DEFAULT_LFO_STATE = Object.freeze({
+  enabled: false,
+  frequency: 0,
+});
+
+const DEFAULT_DAC_STATE = Object.freeze({
+  enabled: false,
+  value: 0x80,
+});
+
+// Channel 3 special mode uses one normal channel 3 frequency pair plus
+// three extra frequency pairs.
+//
+// Logical operator mapping in this synth API:
+//   OP1, OP2, OP3, OP4
+//
+// YM2612 special frequency register mapping:
+//   OP3 -> 0xA8 / 0xAC
+//   OP1 -> 0xA9 / 0xAD
+//   OP2 -> 0xAA / 0xAE
+//   OP4 -> normal channel 3 registers 0xA2 / 0xA6
+const CHANNEL_3_SPECIAL_FREQUENCY_REGISTERS = {
+  0: { low: 0xa9, high: 0xad },
+  1: { low: 0xaa, high: 0xae },
+  2: { low: 0xa8, high: 0xac },
+  3: { low: 0xa2, high: 0xa6 },
+};
+
+/**
+ * Direct transport for the current `web/ym2612.js` implementation.
+ *
+ * This keeps the synth layer from depending on `Ym2612` method names directly.
+ * A future AudioWorklet transport can implement the same `write` / `reset` shape.
+ */
+export class YM2612DirectTransport {
+  /**
+   * @param {{
+   *   writeRegister(register: number, value: number, port?: number): void,
+   *   sampleRate?: () => number,
+   *   generateStereoView?: (frames: number) => {left: Float32Array, right: Float32Array},
+   *   generateStereo?: (frames: number) => {left: Float32Array, right: Float32Array},
+   *   reset?: () => void,
+   *   read?: (offset: number) => number,
+   *   readStatus?: () => number,
+   *   getIrq?: () => boolean,
+   * }} chip
+   */
+  constructor(chip) {
+    if (!chip || typeof chip.writeRegister !== "function") {
+      throw new Error("YM2612DirectTransport requires a chip with writeRegister(register, value, port)");
+    }
+    this.chip = chip;
+    this.frame = 0;
+    this.dacPlayer = null;
+    this.dacPanRegister = 0;
+  }
+
+  reset() {
+    this.dacPlayer?.reset();
+    this.frame = 0;
+    this.dacPanRegister = 0;
+    if (typeof this.chip.reset === "function") {
+      this.chip.reset();
+    }
+  }
+
+  write(port, register, value) {
+    if (port === 1 && register === 0xb6) this.dacPanRegister = value;
+    this.dacPlayer?.observeWrite(port, register, value);
+    this.chip.writeRegister(register, value, port);
+  }
+
+  dacCommand(command) {
+    if (!this.dacPlayer) {
+      if (typeof this.chip.sampleRate !== 'function' || typeof this.chip.generateStereo !== 'function') {
+        throw new Error('PCM DAC needs a chip with sampleRate() and generateStereo()');
+      }
+      this.dacPlayer = new YM2612DacPlayer(this.chip.sampleRate(), (p, r, v) => this.write(p, r, v));
+    }
+    this.dacPlayer.panRegister = this.dacPanRegister;
+    this.dacPlayer.command(command, this.frame);
+  }
+
+  /** Render through this transport to advance PCM playback and the Node timeline together. */
+  generateStereo(frames) {
+    if (!Number.isSafeInteger(frames) || frames < 0) throw new RangeError('frames must be a nonnegative integer');
+    const left = new Float32Array(frames), right = new Float32Array(frames);
+    const generate = (this.chip.generateStereoView ?? this.chip.generateStereo).bind(this.chip);
+    let offset = 0;
+    while (offset < frames) {
+      this.dacPlayer?.advance(this.frame);
+      const count = Math.min(frames - offset, (this.dacPlayer?.nextFrame() ?? Infinity) - this.frame);
+      const pcm = generate(count);
+      // Borrowed views may cover reserved capacity, not just this segment.
+      for (let i = 0; i < count; i++) {
+        left[offset + i] = pcm.left[i];
+        right[offset + i] = pcm.right[i];
+      }
+      this.frame += count; offset += count;
+    }
+    return {left, right};
+  }
+
+  read(offset) {
+    if (typeof this.chip.read !== "function") {
+      throw new Error("YM2612DirectTransport chip does not support read(offset)");
+    }
+    return this.chip.read(offset);
+  }
+
+  readStatus() {
+    if (typeof this.chip.readStatus === "function") {
+      return this.chip.readStatus();
+    }
+    return this.read(0);
+  }
+
+  getIrq() {
+    if (typeof this.chip.getIrq !== "function") {
+      return false;
+    }
+    return this.chip.getIrq();
+  }
+}
+
+export class YM2612WorkletTransport {
+  /**
+   * @param {AudioWorkletNode} node
+   */
+  constructor(node) {
+    this.endpoint = node?.execution === 'worklet' ? node : null;
+    if (!node?.port && node?.postMessage) node = {port: node};
+    this.node = node;
+    this.irqAsserted = false;
+    this.dacRequests = new Map();
+    this.dacRequestId = 0;
+    this.disposed = false;
+
+    if (typeof this.node.port.addEventListener === "function") {
+      this.node.port.addEventListener(
+        "message",
+        (event) => {
+          const message = event.data;
+          if (message?.type === 'pcm-dac-result') {
+            const request = this.dacRequests.get(message.id);
+            this.dacRequests.delete(message.id);
+            if (request) message.error ? request.reject(new Error(message.error)) : request.resolve();
+          }
+          if (message && message.type === "irq") {
+            this.irqAsserted = Boolean(message.asserted);
+          }
+        }
+      );
+      if (typeof this.node.port.start === "function") {
+        this.node.port.start();
+      }
+    }
+  }
+
+  start() {
+    if (!this.endpoint) return Promise.reject(new Error('start() requires a createSoundChip worklet endpoint'));
+    return this.endpoint.start();
+  }
+  stop() {return this.endpoint?.stop() ?? Promise.resolve();}
+  async close() {this.dispose(); await this.endpoint?.dispose();}
+  flush() {return this.endpoint?.request('barrier') ?? Promise.resolve();}
+
+  dacCommand(command) {
+    if (this.disposed) return Promise.reject(new Error('DAC transport disposed'));
+    if (typeof this.node.port.addEventListener !== 'function') return Promise.reject(new Error('DAC transport requires MessagePort events'));
+    const id = ++this.dacRequestId;
+    return new Promise((resolve, reject) => {
+      this.dacRequests.set(id, {resolve, reject});
+      try {
+        this.node.port.postMessage({type: 'pcm-dac', id, command}, command.data ? [command.data.buffer] : []);
+      } catch (error) { this.dacRequests.delete(id); reject(error); }
+    });
+  }
+
+  /** Call before disconnecting/closing the node to reject unfinished registrations. */
+  dispose() {
+    if (this.disposed) return;
+    this.node.port.postMessage({type: 'clear-dac-playback'});
+    this.disposed = true;
+    for (const request of this.dacRequests.values()) request.reject(new Error('DAC transport disposed'));
+    this.dacRequests.clear();
+  }
+
+  reset() {
+    this.node.port.postMessage({
+      type: "reset",
+    });
+  }
+
+  write(port, register, value) {
+    this.node.port.postMessage({
+      type: "write",
+      port,
+      register,
+      value,
+    });
+  }
+
+  scheduleWrites(entries) {
+    this.node.port.postMessage({
+      type: "schedule-writes",
+      entries,
+    });
+  }
+
+  clearScheduledWrites() {
+    this.node.port.postMessage({ type: "clear-scheduled-writes" });
+  }
+
+  loadDacBank(name, bytes) {
+    this.node.port.postMessage(
+      { type: "load-dac-bank", name, data: bytes.buffer },
+      [bytes.buffer]
+    );
+  }
+
+  playDacBank(name, time) {
+    this.node.port.postMessage({ type: "play-dac-bank", name, time });
+  }
+
+  clearDacPlayback() {
+    this.node.port.postMessage({ type: "clear-dac-playback" });
+  }
+
+  getIrq() {
+    return this.irqAsserted;
+  }
+}
+
+export class YM2612Synth {
+  /**
+   * @param {YM2612SynthOptions} options
+   */
+  constructor(options = {}) {
+    const { transport } = options;
+    if (!transport || typeof transport.write !== "function") {
+      throw new Error("YM2612Synth requires a transport with a write(...) function");
+    }
+
+    this.transport = transport;
+    this.hooks = {
+      onWrite: undefined,
+      onRead: undefined,
+      onIrq: undefined,
+    };
+    this._lastIrqState = undefined;
+    this.channels = [];
+    this.reset();
+  }
+
+  reset() {
+    if (typeof this.transport.reset === "function") {
+      this.transport.reset();
+    }
+
+    this._pendingAddressPort = undefined;
+    this._pendingAddressRegister = undefined;
+    this._modeRegister = 0x00;
+    this.dac ??= new YM2612Dac(this.transport);
+    this.dac.enabled = DEFAULT_DAC_STATE.enabled;
+    this.dac.value = DEFAULT_DAC_STATE.value;
+    this.lfo = {
+      enabled: DEFAULT_LFO_STATE.enabled,
+      frequency: DEFAULT_LFO_STATE.frequency,
+    };
+    this.channels = [];
+    for (let channel = 0; channel < CHANNEL_COUNT; channel += 1) {
+      this.channels.push(createDefaultChannelState());
+    }
+
+    this._syncIrq();
+  }
+
+  /**
+   * Apply a preset to one channel.
+   *
+   * Preset data should live outside this file.
+   * This method only knows how to apply the preset shape.
+   *
+   * Supported shape:
+   * {
+   *   algorithm?: number,
+   *   feedback?: number,
+   *   pan?: { left?: boolean, right?: boolean },
+   *   operators?: [op1, op2, op3, op4]
+   * }
+   *
+   * @param {number} channel
+   * @param {YM2612Preset} preset
+   * @returns {void}
+   */
+  setPreset(channel, preset) {
+    assertChannel(channel);
+    if (!preset || typeof preset !== "object") {
+      throw new Error("preset must be an object");
+    }
+
+    if (preset.algorithm !== undefined || preset.feedback !== undefined) {
+      const current = this.channels[channel];
+      this.setAlgo(
+        channel,
+        preset.algorithm !== undefined ? preset.algorithm : current.algorithm,
+        preset.feedback !== undefined ? preset.feedback : current.feedback
+      );
+    }
+
+    if (
+      preset.pan ||
+      preset.ams !== undefined ||
+      preset.pms !== undefined
+    ) {
+      const pan = preset.pan || {};
+      const current = this.channels[channel];
+      this.setPan(
+        channel,
+        pan.left !== undefined ? pan.left : current.left,
+        pan.right !== undefined ? pan.right : current.right,
+        preset.ams !== undefined ? preset.ams : current.ams,
+        preset.pms !== undefined ? preset.pms : current.pms
+      );
+    }
+
+    if (preset.operators && typeof preset.operators === "object") {
+      const operatorIndexOffset = preset.operators[0] !== undefined ? 0 : 1;
+      for (let operator = 0; operator < OPERATOR_COUNT; operator += 1) {
+        const params = getPresetOperatorParams(
+          preset,
+          operator + operatorIndexOffset
+        );
+        if (params) {
+          this.setOperator(channel, operator, params);
+        }
+      }
+    }
+  }
+
+  /**
+   * Partial operator update.
+   *
+   * Public operators use 0..3 so they match JavaScript indexing.
+   *
+   * @param {number} channel
+   * @param {number} operator
+   * @param {YM2612OperatorParams} params
+   * @returns {void}
+   */
+  setOperator(channel, operator, params) {
+    assertChannel(channel);
+    assertOperator(operator);
+    params = validateOperatorParams(params);
+
+    const state = this.channels[channel].operators[operator];
+    const { port, channelOffset } = splitChannel(channel);
+    const slotOffset = OPERATOR_SLOT_OFFSETS[operator];
+
+    if (params.dt !== undefined || params.multi !== undefined) {
+      const dt = params.dt !== undefined ? validateRange("dt", params.dt, 0, 7) : state.dt;
+      const multi = params.multi !== undefined ? validateRange("multi", params.multi, 0, 15) : state.multi;
+      state.dt = dt;
+      state.multi = multi;
+
+      // DT / MULTI
+      // base 0x30, plus channel number within the port, plus operator slot spacing
+      this._write(port, 0x30 + channelOffset + slotOffset, (dt << 4) | multi);
+    }
+
+    if (params.tl !== undefined) {
+      state.tl = validateRange("tl", params.tl, 0, 127);
+
+      // Total Level
+      // base 0x40
+      this._write(port, 0x40 + channelOffset + slotOffset, state.tl);
+    }
+
+    if (params.rs !== undefined || params.ar !== undefined) {
+      const rs = params.rs !== undefined ? validateRange("rs", params.rs, 0, 3) : state.rs;
+      const ar = params.ar !== undefined ? validateRange("ar", params.ar, 0, 31) : state.ar;
+      state.rs = rs;
+      state.ar = ar;
+
+      // Rate Scaling / Attack Rate
+      // base 0x50
+      this._write(port, 0x50 + channelOffset + slotOffset, (rs << 6) | ar);
+    }
+
+    if (params.am !== undefined || params.d1r !== undefined) {
+      const am =
+        params.am !== undefined
+          ? validateBoolean("am", params.am)
+          : state.am;
+      const d1r =
+        params.d1r !== undefined
+          ? validateRange("d1r", params.d1r, 0, 31)
+          : state.d1r;
+      state.am = am;
+      state.d1r = d1r;
+
+      // AM enable / First Decay Rate
+      // base 0x60
+      this._write(
+        port,
+        0x60 + channelOffset + slotOffset,
+        (am ? 0x80 : 0x00) | d1r
+      );
+    }
+
+    if (params.sr !== undefined || params.d2r !== undefined) {
+      const sustainRate =
+        params.sr !== undefined
+          ? validateRange("sr", params.sr, 0, 31)
+          : validateRange("d2r", params.d2r, 0, 31);
+      state.d2r = sustainRate;
+
+      // Sustain Rate / "D2R"
+      // YM2612 register 0x70 is the sustain rate register.
+      // This synth keeps `d2r` for the current learning/demo naming,
+      // but also accepts `sr` so TFI import can map to the same place.
+      this._write(port, 0x70 + channelOffset + slotOffset, state.d2r);
+    }
+
+    if (params.sl !== undefined || params.rr !== undefined) {
+      const sl = params.sl !== undefined ? validateRange("sl", params.sl, 0, 15) : state.sl;
+      const rr = params.rr !== undefined ? validateRange("rr", params.rr, 0, 15) : state.rr;
+      state.sl = sl;
+      state.rr = rr;
+
+      // Sustain Level / Release Rate
+      // base 0x80
+      this._write(port, 0x80 + channelOffset + slotOffset, (sl << 4) | rr);
+    }
+
+    if (params.ssg !== undefined) {
+      state.ssg = validateRange("ssg", params.ssg, 0, 15);
+
+      // SSG-EG
+      // base 0x90
+      this._write(port, 0x90 + channelOffset + slotOffset, state.ssg);
+    }
+  }
+
+  /**
+   * Apply partial operator settings in array order, preserving repeated entries.
+   * All inputs are validated before any state change or register write.
+   * Fields within each entry use setOperator's register order.
+   * @param {number} channel
+   * @param {Array<[number, YM2612OperatorParams]>} entries
+   * @returns {void}
+   */
+  setOperators(channel, entries) {
+    assertChannel(channel);
+    if (!Array.isArray(entries)) throw new Error("entries must be an array");
+    const validated = Array.from(entries, (entry) => {
+      if (!Array.isArray(entry) || entry.length !== 2) throw new Error("entry must be [operator, params]");
+      const [operator, params] = entry;
+      assertOperator(operator);
+      return [operator, validateOperatorParams(params)];
+    });
+    for (const [operator, params] of validated) this.setOperator(channel, operator, params);
+  }
+
+  /**
+   * Set channel algorithm and feedback.
+   *
+   * @param {number} channel
+   * @param {number} algorithm
+   * @param {number} [feedback=0]
+   * @returns {void}
+   */
+  setAlgo(channel, algorithm, feedback = 0) {
+    assertChannel(channel);
+    const validAlgorithm = validateRange("algorithm", algorithm, 0, 7);
+    const validFeedback = validateRange("feedback", feedback, 0, 7);
+
+    const state = this.channels[channel];
+    state.algorithm = validAlgorithm;
+    state.feedback = validFeedback;
+
+    const { port, channelOffset } = splitChannel(channel);
+
+    // Algorithm / Feedback
+    // base 0xb0
+    this._write(port, 0xb0 + channelOffset, (validFeedback << 3) | validAlgorithm);
+  }
+
+  /**
+   * Set left/right output enable, AM sensitivity, and PM sensitivity for one channel.
+   *
+   * @param {number} channel
+   * @param {boolean} left
+   * @param {boolean} right
+   * @param {number} [ams]
+   * @param {number} [pms]
+   * @returns {void}
+   */
+  setPan(channel, left, right, ams = undefined, pms = undefined) {
+    assertChannel(channel);
+    if (typeof left !== "boolean" || typeof right !== "boolean") {
+      throw new Error("left and right must be boolean");
+    }
+
+    const state = this.channels[channel];
+    const validAms = validateRange(
+      "ams",
+      ams !== undefined ? ams : state.ams,
+      0,
+      3
+    );
+    const validPms = validateRange(
+      "pms",
+      pms !== undefined ? pms : state.pms,
+      0,
+      7
+    );
+    state.left = left;
+    state.right = right;
+    state.ams = validAms;
+    state.pms = validPms;
+
+    const { port, channelOffset } = splitChannel(channel);
+    let value = 0;
+    if (left) {
+      value |= 0x80;
+    }
+    if (right) {
+      value |= 0x40;
+    }
+    value |= validAms << 4;
+    value |= validPms;
+
+    // Left / Right output enable + AMS + PMS
+    // base 0xb4
+    this._write(port, 0xb4 + channelOffset, value);
+  }
+
+  /**
+   * Set YM2612 chip-global LFO state.
+   *
+   * Register 0x22:
+   * - bit 3 = LFO enable
+   * - bits 2-0 = LFO frequency
+   *
+   * @param {boolean} enabled
+   * @param {number} frequency
+   * @returns {void}
+   */
+  setLfo(enabled, frequency) {
+    const validEnabled = validateBoolean("enabled", enabled);
+    const validFrequency = validateRange(
+      "frequency",
+      frequency,
+      0,
+      7
+    );
+
+    this.lfo.enabled = validEnabled;
+    this.lfo.frequency = validFrequency;
+
+    // LFO enable / frequency
+    // chip-global register 0x22 on port 0
+    this._write(
+      0,
+      0x22,
+      (validEnabled ? 0x08 : 0x00) |
+        validFrequency
+    );
+  }
+
+  /**
+   * Enable or disable YM2612 channel 3 special / 3-slot mode.
+   *
+   * Register 0x27:
+   * - bit 6 = channel 3 special mode
+   *
+   * This method preserves the other mode/timer bits tracked by this synth
+   * layer so it can coexist with future 0x27 helpers.
+   *
+   * @param {boolean} enabled
+   * @returns {void}
+   */
+  setChannel3SpecialMode(enabled) {
+    const validEnabled = validateBoolean("enabled", enabled);
+    this._modeRegister = validEnabled
+      ? (this._modeRegister | 0x40)
+      : (this._modeRegister & ~0x40);
+
+    // Timer control / channel 3 mode
+    this._write(0, 0x27, this._modeRegister);
+  }
+
+  /**
+   * Set one channel 3 operator frequency while special mode is active.
+   *
+   * This is a thin YM2612-shaped helper:
+   * - logical operators use 0..3
+   * - block/fnum are written directly to YM2612 frequency registers
+   *
+   * Special channel 3 register mapping:
+   * - OP3 -> 0xA8 / 0xAC
+   * - OP1 -> 0xA9 / 0xAD
+   * - OP2 -> 0xAA / 0xAE
+   * - OP4 -> normal channel 3 0xA2 / 0xA6
+   *
+   * @param {number} operator
+   * @param {number} block
+   * @param {number} fnum
+   * @returns {void}
+   */
+  setChannel3SpecialFrequency(operator, block, fnum) {
+    assertOperator(operator);
+    const validBlock = validateRange("block", block, 0, 7);
+    const validFnum = validateRange("fnum", fnum, 0, 0x7ff);
+    const registers = CHANNEL_3_SPECIAL_FREQUENCY_REGISTERS[operator];
+    const fnumHigh = (validFnum >> 8) & 0x07;
+    const fnumLow = validFnum & 0xff;
+
+    this.channels[CHANNEL_3_INDEX].specialFrequencies[operator] = {
+      block: validBlock,
+      fnum: validFnum,
+    };
+
+    // BLOCK / F-NUM high, then low
+    this._write(0, registers.high, (validBlock << 3) | fnumHigh);
+    this._write(0, registers.low, fnumLow);
+  }
+
+  /**
+   * Enable or disable the YM2612 DAC path on channel 6.
+   *
+   * Register 0x2B:
+   * - bit 7 = DAC enable
+   *
+   * @param {boolean} enabled
+   * @returns {void}
+   */
+  setDacEnabled(enabled) {
+    const validEnabled = validateBoolean("enabled", enabled);
+    this.dac.enabled = validEnabled;
+
+    // DAC enable
+    this._write(0, 0x2b, validEnabled ? 0x80 : 0x00);
+  }
+
+  /**
+   * Write one 8-bit DAC sample byte.
+   *
+   * Register 0x2A:
+   * - one 8-bit DAC value
+   *
+   * The YM2612 DAC path is software-fed, so callers normally write many of
+   * these in sequence at a chosen sample rate.
+   *
+   * @param {number} value
+   * @returns {void}
+   */
+  writeDac(value) {
+    const validValue = validateRange("value", value, 0, 0xff);
+    this.dac.value = validValue;
+
+    // DAC data
+    this._write(0, 0x2a, validValue);
+  }
+
+  /**
+   * Write BLOCK / F-NUM without triggering KEY ON.
+   *
+   * This is the explicit YM2612-shaped frequency helper:
+   * - setFrequency(CH1, 4, 553)
+   * - keyOn(CH1)
+   *
+   * @param {number} channel
+   * @param {number} block
+   * @param {number} fnum
+   * @returns {void}
+   */
+  setFrequency(channel, block, fnum) {
+    assertChannel(channel);
+    const validBlock = validateRange("block", block, 0, 7);
+    const validFnum = validateRange("fnum", fnum, 0, 0x7ff);
+
+    const state = this.channels[channel];
+    state.block = validBlock;
+    state.fnum = validFnum;
+
+    const { port, channelOffset } = splitChannel(channel);
+    const fnumHigh = (validFnum >> 8) & 0x07;
+    const fnumLow = validFnum & 0xff;
+
+    // BLOCK / F-NUM high
+    // base 0xa4
+    this._write(port, 0xa4 + channelOffset, (validBlock << 3) | fnumHigh);
+
+    // F-NUM low
+    // base 0xa0
+    this._write(port, 0xa0 + channelOffset, fnumLow);
+  }
+
+  /**
+   * Trigger KEY ON on one channel.
+   *
+   * If operators are omitted, all four logical operators are keyed on.
+   *
+   * @param {number} channel
+   * @param {number[]} [operators]
+   * @returns {void}
+   */
+  keyOn(channel, operators = undefined) {
+    assertChannel(channel);
+    const operatorMask = buildKeyOperatorMask(operators);
+
+    // Key On / Key Off register
+    // register 0x28 uses upper nibble as operator mask
+    this._write(0, 0x28, operatorMask | KEY_CHANNEL_CODES[channel]);
+  }
+
+  /**
+   * Trigger KEY OFF on one channel.
+   *
+   * YM2612 key off happens per channel through register 0x28.
+   * If a partial operator list is passed, only those operator bits are cleared.
+   *
+   * @param {number} channel
+   * @param {number[]} [operators]
+   * @returns {void}
+   */
+  keyOff(channel, operators = undefined) {
+    assertChannel(channel);
+
+    if (operators === undefined) {
+      this._write(0, 0x28, KEY_CHANNEL_CODES[channel]);
+      return;
+    }
+
+    const operatorMask = buildKeyOperatorMask(operators);
+    this._write(0, 0x28, operatorMask | KEY_CHANNEL_CODES[channel]);
+  }
+
+  /**
+   * Write BLOCK/FNUM and trigger Key On for all operators on one channel.
+   *
+   * @param {number} channel
+   * @param {number} block
+   * @param {number} fnum
+   * @returns {void}
+   */
+  noteOn(channel, block, fnum) {
+    this.setFrequency(channel, block, fnum);
+    this.keyOn(channel);
+  }
+
+  /**
+   * Trigger Key Off for all operators on one channel.
+   *
+   * @param {number} channel
+   * @returns {void}
+   */
+  noteOff(channel) {
+    this.keyOff(channel);
+  }
+
+  /**
+   * Write one YM2612 register.
+   *
+   * This is the compact form:
+   *
+   *   write(port, register, value)
+   *
+   * which corresponds to:
+   *
+   * - write register number to the address port
+   * - write value to the data port
+   *
+   * This does not currently synchronize `this.channels` state.
+   * It is mainly for low-level/manual YM2612 register work.
+   *
+   * @param {number} port
+   * @param {number} register
+   * @param {number} value
+   * @returns {void}
+   */
+  write(port, register, value) {
+    const validPort = validateRange("port", port, 0, 1);
+    const validRegister = validateRange("register", register, 0, 0xff);
+    const validValue = validateRange("value", value, 0, 0xff);
+
+    this._write(
+      validPort,
+      validRegister,
+      validValue
+    );
+  }
+
+  scheduleWrites(entries) {
+    if (typeof this.transport.scheduleWrites !== "function") {
+      throw new Error("Scheduled writes require an AudioWorklet transport");
+    }
+    this.transport.scheduleWrites(entries);
+  }
+
+  clearScheduledWrites() {
+    if (typeof this.transport.clearScheduledWrites === "function") {
+      this.transport.clearScheduledWrites();
+    }
+  }
+
+  loadDacBank(name, bytes) {
+    this.transport.loadDacBank(name, bytes);
+  }
+
+  playDacBank(name, time) {
+    this.transport.playDacBank(name, time);
+  }
+
+  clearDacPlayback() {
+    this.transport.clearDacPlayback();
+  }
+
+  /**
+   * Write one YM2612 register number to the address port.
+   *
+   * Port mapping:
+   * - port 0 = A1=0, A0=0
+   * - port 1 = A1=1, A0=0
+   *
+   * Use this together with `writeData()`.
+   *
+   * @param {number} port
+   * @param {number} register
+   * @returns {void}
+   */
+  writeAddress(port, register) {
+    const validPort = validateRange("port", port, 0, 1);
+    const validRegister = validateRange("register", register, 0, 0xff);
+
+    this._pendingAddressPort = validPort;
+    this._pendingAddressRegister = validRegister;
+  }
+
+  /**
+   * Write one YM2612 value to the data port after `writeAddress()`.
+   *
+   * Port mapping:
+   * - port 0 = A1=0, A0=1
+   * - port 1 = A1=1, A0=1
+   *
+   * @param {number} value
+   * @returns {void}
+   */
+  writeData(value) {
+    const validValue = validateRange("value", value, 0, 0xff);
+
+    if (this._pendingAddressPort === undefined || this._pendingAddressRegister === undefined) {
+      throw new Error("writeData(value) requires a previous writeAddress(port, register)");
+    }
+
+    this._write(
+      this._pendingAddressPort,
+      this._pendingAddressRegister,
+      validValue
+    );
+  }
+
+  /**
+   * Read one raw YM2612 bus offset.
+   *
+   * Offset mapping:
+   * - 0 = status port
+   * - 1 = data port
+   * - 2 = upper status port
+   * - 3 = upper data port
+   *
+   * @param {number} offset
+   * @returns {number}
+   */
+  read(offset) {
+    const validOffset = validateRange("offset", offset, 0, 3);
+    if (typeof this.transport.read !== "function") {
+      throw new Error("This YM2612 transport does not support read(offset)");
+    }
+
+    const value = this.transport.read(validOffset);
+    this._notifyRead(validOffset, value);
+    this._syncIrq();
+    return value;
+  }
+
+  /**
+   * Read the YM2612 status register.
+   *
+   * This is a convenience alias for low-level status reads.
+   *
+   * @returns {number}
+   */
+  readStatus() {
+    const value =
+      typeof this.transport.readStatus === "function"
+        ? this.transport.readStatus()
+        : this.read(0);
+
+    if (typeof this.transport.readStatus === "function") {
+      this._notifyRead(0, value);
+      this._syncIrq();
+    }
+
+    return value;
+  }
+
+  /**
+   * Attach low-level hooks for register traffic and IRQ changes.
+   *
+   * @param {{
+   *   onWrite?: ((command: { port: number, register: number, value: number }) => void),
+   *   onRead?: ((event: { offset: number, value: number }) => void),
+   *   onIrq?: ((asserted: boolean) => void),
+   * }} hooks
+   * @returns {void}
+   */
+  setHooks(hooks = {}) {
+    const { onWrite, onRead, onIrq } = hooks;
+    assertHook("onWrite", onWrite);
+    assertHook("onRead", onRead);
+    assertHook("onIrq", onIrq);
+    this.hooks = { onWrite, onRead, onIrq };
+    this._lastIrqState = undefined;
+    this._syncIrq();
+  }
+
+  /**
+   * Backward-compatible alias for older playground/demo code.
+   *
+   * @param {number} port
+   * @param {number} register
+   * @param {number} value
+   * @returns {void}
+   */
+  rawWrite(port, register, value) {
+    this.write(port, register, value);
+  }
+
+  /**
+   * Central write exit.
+   *
+   * This is intentionally one place so that later we can:
+   * - swap the transport to AudioWorklet
+   * - insert a recorder
+   * - attach sample-timed command scheduling
+   *
+   * @param {number} port
+   * @param {number} register
+   * @param {number} value
+   * @returns {void}
+   */
+  _write(port, register, value) {
+    const command = { port, register, value };
+
+    // Current transports may prefer either:
+    //   transport.write(port, register, value)
+    // or:
+    //   transport.write(command)
+    if (this.transport.write.length >= 3) {
+      this.transport.write(port, register, value);
+    } else {
+      this.transport.write(command);
+    }
+
+    if (typeof this.hooks.onWrite === "function") {
+      this.hooks.onWrite(command);
+    }
+    this._syncIrq();
+  }
+
+  getState() {
+    return structuredCloneCompat({
+      modeRegister: this._modeRegister,
+      dac: {enabled: this.dac.enabled, value: this.dac.value},
+      lfo: this.lfo,
+      channels: this.channels,
+    });
+  }
+
+  _notifyRead(offset, value) {
+    if (typeof this.hooks.onRead === "function") {
+      this.hooks.onRead({ offset, value });
+    }
+  }
+
+  _syncIrq() {
+    if (typeof this.transport.getIrq !== "function" || typeof this.hooks.onIrq !== "function") {
+      return;
+    }
+
+    const asserted = this.transport.getIrq();
+    if (this._lastIrqState === asserted) {
+      return;
+    }
+
+    this._lastIrqState = asserted;
+    this.hooks.onIrq(asserted);
+  }
+}
+
+function createDefaultChannelState() {
+  return {
+    algorithm: DEFAULT_CHANNEL_STATE.algorithm,
+    feedback: DEFAULT_CHANNEL_STATE.feedback,
+    ams: DEFAULT_CHANNEL_STATE.ams,
+    pms: DEFAULT_CHANNEL_STATE.pms,
+    left: DEFAULT_CHANNEL_STATE.left,
+    right: DEFAULT_CHANNEL_STATE.right,
+    block: DEFAULT_CHANNEL_STATE.block,
+    fnum: DEFAULT_CHANNEL_STATE.fnum,
+    specialFrequencies: [
+      { block: DEFAULT_CHANNEL_STATE.block, fnum: DEFAULT_CHANNEL_STATE.fnum },
+      { block: DEFAULT_CHANNEL_STATE.block, fnum: DEFAULT_CHANNEL_STATE.fnum },
+      { block: DEFAULT_CHANNEL_STATE.block, fnum: DEFAULT_CHANNEL_STATE.fnum },
+      { block: DEFAULT_CHANNEL_STATE.block, fnum: DEFAULT_CHANNEL_STATE.fnum },
+    ],
+    operators: [
+      { ...DEFAULT_OPERATOR_STATE },
+      { ...DEFAULT_OPERATOR_STATE },
+      { ...DEFAULT_OPERATOR_STATE },
+      { ...DEFAULT_OPERATOR_STATE },
+    ],
+  };
+}
+
+function validateOperatorParams(params) {
+  if (!params || typeof params !== "object" || Array.isArray(params)) {
+    throw new Error("params must be an object");
+  }
+  const result = {};
+  const ranges = { dt: 7, multi: 15, tl: 127, rs: 3, ar: 31, d1r: 31, sr: 31, d2r: 31, sl: 15, rr: 15, ssg: 15 };
+  for (const [name, max] of Object.entries(ranges)) {
+    const value = params[name];
+    if (value !== undefined) result[name] = validateRange(name, value, 0, max);
+  }
+  const am = params.am;
+  if (am !== undefined) result.am = validateBoolean("am", am);
+  return result;
+}
+
+function splitChannel(channel) {
+  if (channel < 3) {
+    return { port: 0, channelOffset: channel };
+  }
+  return { port: 1, channelOffset: channel - 3 };
+}
+
+function buildKeyOperatorMask(operators) {
+  if (operators === undefined) {
+    return 0xf0;
+  }
+
+  if (!Array.isArray(operators) || operators.length === 0) {
+    throw new Error("operators must be a non-empty array when provided");
+  }
+
+  let mask = 0;
+  for (const operator of operators) {
+    assertOperator(operator);
+    mask |= KEY_OPERATOR_BITS[operator];
+  }
+
+  return mask;
+}
+
+function assertChannel(channel) {
+  if (!Number.isInteger(channel) || channel < 0 || channel >= CHANNEL_COUNT) {
+    throw new Error(`channel must be an integer in range 0..5, got ${channel}`);
+  }
+}
+
+function assertOperator(operator) {
+  if (!Number.isInteger(operator) || operator < 0 || operator >= OPERATOR_COUNT) {
+    throw new Error(`operator must be an integer in range 0..3, got ${operator}`);
+  }
+}
+
+function getPresetOperatorParams(
+  preset,
+  operator
+) {
+  const operators =
+    preset?.operators;
+
+  if (!Array.isArray(operators)) {
+    return undefined;
+  }
+
+  return operators[operator];
+}
+
+function validateRange(name, value, min, max) {
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`${name} must be an integer in range ${min}..${max}, got ${value}`);
+  }
+  return value;
+}
+
+function validateBoolean(name, value) {
+  if (typeof value !== "boolean") {
+    throw new Error(
+      `${name} must be a boolean, got ${value}`
+    );
+  }
+  return value;
+}
+
+function assertHook(name, value) {
+  if (value !== undefined && typeof value !== "function") {
+    throw new Error(`${name} must be a function when provided`);
+  }
+}
+
+function structuredCloneCompat(value) {
+  if (typeof structuredClone === "function") {
+    return structuredClone(value);
+  }
+
+  return JSON.parse(JSON.stringify(value));
+}

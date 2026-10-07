@@ -1,0 +1,14 @@
+[package]
+name = "tetorica-fm2612-synth-tauri"
+version = "0.50.1"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

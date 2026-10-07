@@ -1,0 +1,17 @@
+{
+  "name": "tetorica-fm2612-synth-tauri",
+  "version": "0.50.1",
+  "private": true,
+  "scripts": {
+    "dev": "tauri dev --no-dev-server",
+    "build": "tauri build",
+    "import:release": "python3 scripts/import_release.py",
+    "test": "python3 -m unittest discover -s tests && node --test tests/*.test.cjs",
+    "tauri": "tauri",
+    "icons": "node scripts/generate-icons.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.5"
+  },
+  "license": "BSD-3-Clause"
+}

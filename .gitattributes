@@ -1,0 +1,2 @@
+# Preserve imported bytes and hashes on every build platform, including Windows.
+dist/** -text
