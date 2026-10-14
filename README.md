@@ -21,6 +21,25 @@ TFI / VGI と録音 JSON の書き出しはネイティブの保存ダイアロ�
 隣の Pin ボタンで最前面表示を切り替えます。選択中はボタンが点灯し、もう一度押すと解除します。
 最前面表示はアプリを起動している間の設定です。ブラウザ版には Pin ボタンを表示しません。
 
+## 音色セットと Files
+
+**Files** ボタンでファイル一覧を表示・非表示にできます。音色ファイルを選ぶと、既存の Synth で編集・演奏できます。
+**Save** は編集中の音色を Cassette 内のファイルに保存します。組み込み音色や Custom は **Save…** で新しいファイル名を付けます。
+一覧から **Duplicate／Rename／Delete／New folder** を使えます。同じ操作は右クリックでも開け、削除や名前変更は **Undo** で戻せます。
+未保存の音色を切り替えるときは Save／Discard／Cancel を選びます。
+
+VGM の取り込みは `/presets/<元ファイル名>/` に追加します。同じ元ファイル名でも別のフォルダーを作り、前のセットを上書きしません。
+TFI／VGI のフォルダー構成と Cassette ZIP は FM Playground と共通です。メニューの **Import → Cassette…** と
+**Export → Cassette · ZIP** で行き来できます。Synth が編集しない code・sample・`.git`・空フォルダー・metadata も保持します。
+取り込んだコードは Synth では実行しません。
+
+保存したファイルと Files の表示状態は、このアプリの IndexedDB に draft として保存し、次回起動時に復元します。
+ブラウザ版や FM Playground の保存領域とは独立しています。アプリ間の共有やバックアップには Export Cassette を使ってください。
+未保存の編集、演奏・録音・Looper の状態は draft に含めません。Cassette は ZIP／展開後ともに 16 MiB までです。
+
+新しい音色は VGI を既定としています。TFI はオペレーター、algorithm、feedback、VGI はそれらに加えて pan／AMS／PMS を保存します。
+Chip LFO、DAC、operator AM、CH3 special mode は各形式に含められないため、セッションの操作として扱います。
+
 ## 音声出力
 
 画面左上のハンバーガーメニューから **Audio output** を開き、**Web Audio** または **Native (Rust)**

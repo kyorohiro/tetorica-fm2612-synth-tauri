@@ -1,0 +1,641 @@
+import {
+  strToU8,
+  zipSync,
+} from "./vendor/fflate.js";
+
+const ZIP_LOCAL_FILE_HEADER = 0x04034b50;
+const ZIP_CENTRAL_DIRECTORY_HEADER = 0x02014b50;
+const ZIP_END_OF_CENTRAL_DIRECTORY = 0x06054b50;
+const ZIP_STORED = 0;
+const ZIP_DEFLATE = 8;
+const MAX_CASSETTE_BYTES = 16 * 1024 * 1024;
+
+const CASSETTE_DIRECTORIES = {
+  timbres: new Set([".tfi", ".vgi"]),
+  examples: new Set([".js"]),
+  samples: new Set([
+    ".wav",
+    ".flac",
+    ".mp3",
+    ".ogg",
+    ".m4a",
+  ]),
+};
+
+/**
+ * Export a virtual filesystem. With preserveMetadataFiles: true, existing
+ * metadata files are parsed for validity and copied byte-for-byte. Otherwise
+ * these names remain reserved for the generated cassette metadata.
+ */
+export function createPlaygroundCassetteZip(files, options = {}) {
+  const entries = {};
+  for (const directory of options.directories ?? []) {
+    if (directory === '/') continue;
+    const path = String(directory).replace(/^\//, '').replace(/\/$/, '');
+    validateZipPath(path);
+    entries[path + '/'] = new Uint8Array();
+  }
+
+  for (const file of files) {
+    const path = String(file.path ?? "").replace(/^\//, "");
+    validateZipPath(path);
+    if (Object.hasOwn(entries, path)) {
+      throw new Error(`Duplicate cassette file path "${path}".`);
+    }
+    entries[path] = file.type === "text"
+      ? strToU8(file.data)
+      : new Uint8Array(file.data);
+  }
+
+  if (Object.keys(entries).length === 0) {
+    throw new Error("Cassette must contain at least one file.");
+  }
+
+  const licenseType = normalizeCassetteLicense(options.license);
+  const workType = normalizeCassetteWorkType(options.workType);
+  const metadataFileName = options.metadataFileName === "cassette.metadata.js"
+    ? "cassette.metadata.js"
+    : "metadata.json";
+  const metadataPaths = ["metadata.json", "cassette.metadata.js"]
+    .filter(path => Object.hasOwn(entries, path));
+  if (metadataPaths.length && !options.preserveMetadataFiles) {
+    throw new Error("Cassette metadata files are reserved for cassette metadata.");
+  }
+  for (const path of metadataPaths) {
+    try {
+      const source = new TextDecoder().decode(entries[path]);
+      normalizeCassetteMetadata(path === "metadata.json"
+        ? JSON.parse(source)
+        : parseCassetteMetadataModule(source));
+    } catch (error) {
+      throw new Error(`Invalid cassette ${path}: ${error.message}`);
+    }
+  }
+  const existingMetadata = options.metadata && typeof options.metadata === "object"
+    ? options.metadata
+    : {};
+  const metadata = {
+    ...existingMetadata,
+    version: 1,
+    workType,
+    license: licenseType,
+    ...(licenseType === "CUSTOM" && options.licenseName
+      ? { licenseName: String(options.licenseName).trim() }
+      : {}),
+  };
+  const metadataSource = metadataFileName === "cassette.metadata.js"
+    ? `/** @type {CassetteMetadata} */\nexport default ${JSON.stringify(metadata, null, 2)};\n`
+    : `${JSON.stringify(metadata, null, 2)}\n`;
+  if (!metadataPaths.length) entries[metadataFileName] = strToU8(metadataSource);
+
+  if(Object.values(entries).reduce((sum,entry)=>sum+entry.byteLength,0)>MAX_CASSETTE_BYTES){
+    throw new Error("Cassette exceeds the 16 MiB expanded size loader limit.");
+  }
+
+  const zip = zipSync(entries, { level: 6 });
+  if (zip.byteLength > MAX_CASSETTE_BYTES) {
+    throw new Error(
+      "Cassette exceeds the 16 MiB loader limit."
+    );
+  }
+  return zip;
+}
+
+export async function loadPlaygroundCassette(
+  source,
+  options = {}
+) {
+  const bytes = toUint8Array(source);
+
+  if (bytes.byteLength > MAX_CASSETTE_BYTES) {
+    throw new Error(
+      "Cassette is larger than the 16 MiB limit."
+    );
+  }
+
+  const zipEntries = await readZipEntries(
+    bytes
+  );
+  const cassette = {
+    id: createCassetteId(
+      options.name
+    ),
+    files: new Map(),
+    directories: [],
+    timbres: [],
+    examples: [],
+    samples: [],
+    metadata: { version: 1, workType: "NONE", license: "NONE" },
+  };
+  const namesByCategory = new Map();
+
+  for (const entry of zipEntries) {
+    if (entry.path.endsWith('/')) {
+      cassette.directories.push('/' + entry.path.slice(0, -1));
+      continue;
+    }
+    if (cassette.files.has(entry.path)) {
+      throw new Error(
+        `Duplicate cassette file path "${entry.path}".`
+      );
+    }
+
+    const bytes = await entry.read();
+    cassette.files.set(entry.path, bytes);
+
+    if (entry.path === "metadata.json") {
+      try {
+        const metadata = JSON.parse(new TextDecoder().decode(bytes));
+        cassette.metadata = normalizeCassetteMetadata(metadata);
+      } catch (error) {
+        throw new Error(`Invalid cassette metadata.json: ${error.message}`);
+      }
+      continue;
+    }
+
+    if (entry.path === "cassette.metadata.js") {
+      try {
+        const source = new TextDecoder().decode(bytes);
+        cassette.metadata = normalizeCassetteMetadata(
+          parseCassetteMetadataModule(source)
+        );
+      } catch (error) {
+        throw new Error(`Invalid cassette.metadata.js: ${error.message}`);
+      }
+      continue;
+    }
+
+    const descriptor = describeCassettePath(
+      entry.path
+    );
+
+    if (!descriptor) {
+      continue;
+    }
+
+    let names = namesByCategory.get(
+      descriptor.category
+    );
+    if (!names) {
+      names = new Set();
+      namesByCategory.set(
+        descriptor.category,
+        names
+      );
+    }
+
+    if (names.has(descriptor.name)) {
+      throw new Error(
+        `Duplicate cassette ${descriptor.category} name "${descriptor.name}".`
+      );
+    }
+    names.add(descriptor.name);
+
+    const item = {
+      name: descriptor.name,
+      path: entry.path,
+      bytes,
+    };
+
+    if (descriptor.category === "examples") {
+      item.source = new TextDecoder().decode(
+        bytes
+      );
+    }
+
+    cassette[descriptor.category].push(item);
+  }
+
+  return cassette;
+}
+
+function parseCassetteMetadataModule(source) {
+  const match = String(source).match(
+    /export\s+default\s+([\s\S]*?)\s*;?\s*$/
+  );
+  if (!match) {
+    throw new Error("expected export default object");
+  }
+  return JSON.parse(match[1]);
+}
+
+const CASSETTE_LICENSE_TYPES = new Set([
+  "PRIVATE",
+  "CC0-1.0",
+  "CC-BY-4.0",
+  "CUSTOM",
+  "NONE",
+]);
+
+function normalizeCassetteLicense(value) {
+  const type = String(typeof value === "object" ? value?.type : value ?? "NONE").toUpperCase();
+  return CASSETTE_LICENSE_TYPES.has(type) ? type : "NONE";
+}
+
+function normalizeCassetteWorkType(value) {
+  const type = String(value ?? "NONE").toUpperCase();
+  return type === "TRANSCRIPTION"
+    ? "TRANSCRIPTION"
+    : type === "ORIGINAL" ? "ORIGINAL" : "NONE";
+}
+
+function normalizeCassetteMetadata(value) {
+  const metadata = value && typeof value === "object" ? value : {};
+  const legacyLicense = metadata.license && typeof metadata.license === "object"
+    ? metadata.license
+    : null;
+  return {
+    ...metadata,
+    version: Number.isInteger(metadata.version) ? metadata.version : 1,
+    workType: normalizeCassetteWorkType(metadata.workType),
+    license: normalizeCassetteLicense(metadata.license),
+    ...(legacyLicense?.name ? { licenseName: String(legacyLicense.name) } : {}),
+  };
+}
+
+function createCassetteId(name) {
+  const baseName = String(name ?? "cassette")
+    .split(/[\\/]/)
+    .pop() || "cassette";
+  const withoutExtension = baseName.replace(
+    /\.cassette\.zip$/i,
+    ""
+  ).replace(/\.zip$/i, "");
+
+  return withoutExtension || "cassette";
+}
+
+function describeCassettePath(path) {
+  const parts = path.split("/");
+
+  if (parts.length !== 2) {
+    return null;
+  }
+
+  const [category, fileName] = parts;
+  const extensions = CASSETTE_DIRECTORIES[category];
+
+  if (!extensions) {
+    return null;
+  }
+
+  const extensionIndex = fileName.lastIndexOf(".");
+  const extension = extensionIndex < 0
+    ? ""
+    : fileName.slice(extensionIndex).toLowerCase();
+
+  if (!extensions.has(extension)) {
+    return null;
+  }
+
+  const name = fileName.slice(0, extensionIndex);
+  if (!name) {
+    throw new Error(
+      `Cassette file "${path}" has no public name.`
+    );
+  }
+
+  return {
+    category,
+    name,
+  };
+}
+
+async function readZipEntries(bytes) {
+  const view = new DataView(
+    bytes.buffer,
+    bytes.byteOffset,
+    bytes.byteLength
+  );
+  const endOffset = findEndOfCentralDirectory(
+    view
+  );
+  const entryCount = view.getUint16(
+    endOffset + 10,
+    true
+  );
+  const centralDirectorySize = view.getUint32(
+    endOffset + 12,
+    true
+  );
+  const centralDirectoryOffset = view.getUint32(
+    endOffset + 16,
+    true
+  );
+
+  if (
+    centralDirectoryOffset +
+      centralDirectorySize >
+    bytes.byteLength
+  ) {
+    throw new Error(
+      "Cassette zip has an invalid central directory."
+    );
+  }
+
+  const entries = [];
+  const readState = {
+    totalUncompressedBytes: 0,
+  };
+  let offset = centralDirectoryOffset;
+  let totalUncompressedSize = 0;
+
+  for (let index = 0; index < entryCount; index += 1) {
+    requireSignature(
+      view,
+      offset,
+      ZIP_CENTRAL_DIRECTORY_HEADER,
+      "central directory"
+    );
+
+    const flags = view.getUint16(
+      offset + 8,
+      true
+    );
+    const compression = view.getUint16(
+      offset + 10,
+      true
+    );
+    const compressedSize = view.getUint32(
+      offset + 20,
+      true
+    );
+    const uncompressedSize = view.getUint32(
+      offset + 24,
+      true
+    );
+    const fileNameLength = view.getUint16(
+      offset + 28,
+      true
+    );
+    const extraLength = view.getUint16(
+      offset + 30,
+      true
+    );
+    const commentLength = view.getUint16(
+      offset + 32,
+      true
+    );
+    const localHeaderOffset = view.getUint32(
+      offset + 42,
+      true
+    );
+    const entryEnd = offset + 46 + fileNameLength +
+      extraLength + commentLength;
+
+    if (entryEnd > bytes.byteLength) {
+      throw new Error(
+        "Cassette zip contains a truncated entry."
+      );
+    }
+
+    if ((flags & 0x1) !== 0) {
+      throw new Error(
+        "Encrypted cassette zip entries are not supported."
+      );
+    }
+
+    if (
+      compression !== ZIP_STORED &&
+      compression !== ZIP_DEFLATE
+    ) {
+      throw new Error(
+        `Cassette zip uses unsupported compression method ${compression}.`
+      );
+    }
+
+    if (uncompressedSize > MAX_CASSETTE_BYTES) {
+      throw new Error(
+        "Cassette zip entry exceeds the 16 MiB limit."
+      );
+    }
+    totalUncompressedSize += uncompressedSize;
+    if (totalUncompressedSize > MAX_CASSETTE_BYTES) {
+      throw new Error(
+        "Cassette zip exceeds the 16 MiB expanded size limit."
+      );
+    }
+
+    const path = decodeZipPath(
+      bytes.subarray(
+        offset + 46,
+        offset + 46 + fileNameLength
+      )
+    );
+    validateZipPath(path);
+
+    {
+      entries.push({
+        path,
+        read: () => readZipEntryData({
+          bytes,
+          view,
+          localHeaderOffset,
+          compressedSize,
+          uncompressedSize,
+          compression,
+          readState,
+        }),
+      });
+    }
+
+    offset = entryEnd;
+  }
+
+  return entries;
+}
+
+function findEndOfCentralDirectory(view) {
+  const minimumSize = 22;
+  const firstOffset = Math.max(
+    0,
+    view.byteLength - minimumSize - 0xffff
+  );
+
+  for (
+    let offset = view.byteLength - minimumSize;
+    offset >= firstOffset;
+    offset -= 1
+  ) {
+    if (
+      view.getUint32(offset, true) ===
+      ZIP_END_OF_CENTRAL_DIRECTORY
+    ) {
+      return offset;
+    }
+  }
+
+  throw new Error(
+    "Cassette is not a supported zip archive."
+  );
+}
+
+async function readZipEntryData(entry) {
+  const {
+    bytes,
+    view,
+    localHeaderOffset,
+    compressedSize,
+    uncompressedSize,
+    compression,
+    readState,
+  } = entry;
+
+  requireSignature(
+    view,
+    localHeaderOffset,
+    ZIP_LOCAL_FILE_HEADER,
+    "local file header"
+  );
+
+  const fileNameLength = view.getUint16(
+    localHeaderOffset + 26,
+    true
+  );
+  const extraLength = view.getUint16(
+    localHeaderOffset + 28,
+    true
+  );
+  const dataOffset = localHeaderOffset + 30 +
+    fileNameLength + extraLength;
+  const dataEnd = dataOffset + compressedSize;
+
+  if (dataEnd > bytes.byteLength) {
+    throw new Error(
+      "Cassette zip contains truncated file data."
+    );
+  }
+
+  const compressed = bytes.slice(
+    dataOffset,
+    dataEnd
+  );
+  const result = compression === ZIP_STORED
+    ? compressed
+    : await inflateRaw(
+      compressed,
+      MAX_CASSETTE_BYTES -
+        readState.totalUncompressedBytes
+    );
+
+  if (result.byteLength !== uncompressedSize) {
+    throw new Error(
+      "Cassette zip entry has an unexpected uncompressed size."
+    );
+  }
+
+  if (
+    readState.totalUncompressedBytes +
+      result.byteLength >
+    MAX_CASSETTE_BYTES
+  ) {
+    throw new Error(
+      "Cassette zip exceeds the 16 MiB expanded size limit."
+    );
+  }
+  readState.totalUncompressedBytes +=
+    result.byteLength;
+
+  return result;
+}
+
+async function inflateRaw(
+  compressed,
+  maxOutputBytes
+) {
+  if (typeof DecompressionStream !== "function") {
+    throw new Error(
+      "Cassette zip requires browser deflate support."
+    );
+  }
+
+  const stream = new Blob([compressed])
+    .stream()
+    .pipeThrough(
+      new DecompressionStream("deflate-raw")
+    );
+  const reader = stream.getReader();
+  const chunks = [];
+  let totalBytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+
+      totalBytes += value.byteLength;
+      if (totalBytes > maxOutputBytes) {
+        await reader.cancel();
+        throw new Error(
+          "Cassette zip exceeds the 16 MiB expanded size limit."
+        );
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const result = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return result;
+}
+
+function decodeZipPath(bytes) {
+  return new TextDecoder().decode(bytes);
+}
+
+function validateZipPath(path) {
+  if (
+    !path ||
+    path.startsWith("/") ||
+    path.includes("\\") ||
+    path.replace(/\/$/, '').split("/").some(
+      (part) =>
+        part === "" ||
+        part === "." ||
+        part === ".."
+    )
+  ) {
+    throw new Error(
+      `Cassette zip contains unsafe path "${path}".`
+    );
+  }
+}
+
+function requireSignature(
+  view,
+  offset,
+  signature,
+  label
+) {
+  if (
+    offset < 0 ||
+    offset + 4 > view.byteLength ||
+    view.getUint32(offset, true) !== signature
+  ) {
+    throw new Error(
+      `Cassette zip has an invalid ${label}.`
+    );
+  }
+}
+
+function toUint8Array(source) {
+  if (source instanceof Uint8Array) {
+    return source;
+  }
+
+  if (source instanceof ArrayBuffer) {
+    return new Uint8Array(source);
+  }
+
+  throw new TypeError(
+    "Cassette source must be an ArrayBuffer or Uint8Array."
+  );
+}

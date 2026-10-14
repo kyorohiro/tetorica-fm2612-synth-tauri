@@ -1,6 +1,8 @@
 32X PWM: MAME-derived FIFO/timer core, BSD-3-Clause. See licenses/mame-32x-pwm/.
 NES APU: JSNES, Apache-2.0. See licenses/jsnes/.
 FDS: fixNES-derived, MIT. See licenses/fixnes-fds/.
+Virtual filesystem: tetorica-virtual-files core, BSD-3-Clause. See licenses/tetorica-virtual-files/.
+Cassette ZIP: fflate, MIT. See playground/vendor/fflate-LICENSE.
 
 This package includes two YM2612 engine options:
 

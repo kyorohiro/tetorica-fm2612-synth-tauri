@@ -24,7 +24,7 @@
       const dialog = document.createElement('dialog');
       dialog.style.cssText = 'padding:24px;border:1px solid #92c9c3;border-radius:12px;background:#202928;color:#fff;font:16px system-ui';
       const message = document.createElement('p');
-      message.textContent = 'Reload Synth? Playback and imported presets will be cleared.';
+      message.textContent = 'Reload Synth? Playback and unsaved instrument changes will be cleared. The saved Cassette draft will be restored.';
       const cancel = document.createElement('button'), confirm = document.createElement('button');
       cancel.textContent = 'Cancel'; confirm.textContent = 'Reload';
       cancel.addEventListener('click', () => dialog.close('cancel'));
