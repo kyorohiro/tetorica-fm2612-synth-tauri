@@ -5,6 +5,19 @@
   if (window.top !== window || !local || typeof window.__TAURI_INTERNALS__?.invoke !== 'function') return;
   const invoke = (command, args = {}) => window.__TAURI_INTERNALS__.invoke(command, args);
   const status = text => {const element = document.getElementById('status'); if (element) element.textContent = text;};
+  const MAX_EXPORT_BYTES = 128 * 1024 * 1024, MAX_EXPORT_HEADER_BYTES = 4 * 1024;
+  async function saveExport(blob, filename) {
+    if (blob.size > MAX_EXPORT_BYTES) throw new Error('Export exceeds 128 MiB');
+    const header = new TextEncoder().encode(JSON.stringify({filename}));
+    if (!header.byteLength || header.byteLength > MAX_EXPORT_HEADER_BYTES) throw new Error('Export header exceeds 4096 bytes');
+    const bytes = await blob.arrayBuffer();
+    if (bytes.byteLength > MAX_EXPORT_BYTES) throw new Error('Export exceeds 128 MiB');
+    const packet = new Uint8Array(4 + header.byteLength + bytes.byteLength);
+    new DataView(packet.buffer).setUint32(0, header.byteLength, true);
+    packet.set(header, 4);
+    packet.set(new Uint8Array(bytes), 4 + header.byteLength);
+    return invoke('save_export_binary', packet.buffer);
+  }
   const blobs = new Map();
   const create = URL.createObjectURL.bind(URL), revoke = URL.revokeObjectURL.bind(URL);
   URL.createObjectURL = blob => {const url = create(blob); blobs.set(url, blob); return url;};
@@ -15,7 +28,7 @@
     if (!this.download || !blob) return click.call(this);
     // Hold the Blob before the Synth immediately revokes its temporary URL.
     const filename = this.download;
-    void blob.arrayBuffer().then(bytes => invoke('save_export', {filename, bytes: Array.from(new Uint8Array(bytes))}))
+    void saveExport(blob, filename)
       .then(path => status(path ? `Saved ${path}` : 'Save cancelled.'))
       .catch(error => status(`Could not save: ${String(error)}`));
   };

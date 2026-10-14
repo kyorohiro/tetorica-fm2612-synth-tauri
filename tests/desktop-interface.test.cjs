@@ -1,31 +1,88 @@
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), vm = require('node:vm');
 const source = fs.readFileSync(require('node:path').join(__dirname, '../desktop/desktop-interface.js'), 'utf8');
-function boot(url, subframe = false, fail = false, confirmed = false) {
+function boot(url, subframe = false, fail = false, confirmed = false, saveResult = '/tmp/voice.tfi') {
   const calls = [], status = {textContent: ''}, listeners = {}, button = {disabled: false, addEventListener: (type, fn) => {listeners[type] = fn;}};
+  let receiveExport;
+  const exportCall = new Promise(resolve => {receiveExport = resolve;});
   class Anchor {click() {calls.push('browser-click');}}
   let serial = 0;
   const URLMock = {createObjectURL: () => `blob:${++serial}`, revokeObjectURL() {}};
-  const window = {addEventListener() {}, __TAURI_INTERNALS__: {invoke: async (command, args) => {calls.push({command, args}); if (fail) throw new Error('write failed'); return command === 'save_export' ? '/tmp/voice.tfi' : false;}}};
+  const window = {addEventListener() {}, __TAURI_INTERNALS__: {invoke: async (command, args) => {
+    const call = {command, args}; calls.push(call);
+    if (command === 'save_export_binary') receiveExport(call);
+    if (fail) throw new Error('write failed');
+    return command === 'save_export_binary' ? saveResult : false;
+  }}};
   window.top = subframe ? {} : window;
-  vm.runInNewContext(source, {window, location: new URL(url), URL: URLMock, HTMLAnchorElement: Anchor, Map, Uint8Array, Array,
+  vm.runInNewContext(source, {window, location: new URL(url), URL: URLMock, HTMLAnchorElement: Anchor, Map, Uint8Array, Array, DataView, TextEncoder,
     document: {readyState: 'complete', getElementById: id => id === 'status' ? status : null, querySelector: () => button,
       createElement: () => ({style: {}, children: [], listeners: {},
         addEventListener(type, fn) {this.listeners[type] = fn;}, append(...items) {this.children.push(...items);},
         close(value) {this.returnValue = value; this.listeners.close();}, remove() {}, showModal() {}, focus() {}}),
       body: {append(dialog) {setImmediate(() => dialog.children[confirmed ? 2 : 1].listeners.click());}}}});
-  return {calls, status, listeners, button, Anchor, URL: URLMock};
+  return {calls, status, listeners, button, Anchor, URL: URLMock, exportCall};
 }
 test('local Synth exports original bytes even after immediate URL revocation', async () => {
-  for (const url of ['tauri://localhost/index.html', 'http://tauri.localhost/index.html']) {
+  for (const url of ['tauri://localhost/index.html', 'http://tauri.localhost/index.html', 'https://tauri.localhost/index.html']) {
     const ui = boot(url), link = new ui.Anchor();
     link.href = ui.URL.createObjectURL(new Blob([new Uint8Array([1, 2, 255])])); link.download = 'voice.tfi';
     link.click(); ui.URL.revokeObjectURL(link.href);
     await new Promise(resolve => setImmediate(resolve));
-    assert.equal(ui.calls[0].command, 'save_export');
-    assert.deepEqual(Array.from(ui.calls[0].args.bytes), [1, 2, 255]);
-    assert.equal(ui.calls[0].args.filename, 'voice.tfi'); assert.match(ui.status.textContent, /Saved/);
+    const packet = exportPacket(ui.calls[0]);
+    assert.deepEqual(Array.from(packet.bytes), [1, 2, 255]);
+    assert.equal(packet.header.filename, 'voice.tfi'); assert.match(ui.status.textContent, /Saved/);
   }
+});
+function exportPacket(call) {
+  assert.equal(call.command, 'save_export_binary');
+  assert.ok(call.args instanceof ArrayBuffer, 'Native IPC receives raw bytes, never a numeric JSON array');
+  const headerLength = new DataView(call.args).getUint32(0, true);
+  assert.ok(headerLength > 0 && headerLength <= 4096);
+  const header = JSON.parse(new TextDecoder().decode(new Uint8Array(call.args, 4, headerLength)));
+  return {header, headerLength, bytes:new Uint8Array(call.args, 4 + headerLength)};
+}
+test('16 MiB Cassette export uses one binary packet with only a small JSON header', {timeout:2000}, async () => {
+  const original = new Uint8Array(16 * 1024 * 1024);
+  for (let i = 0; i < original.length; i++) original[i] = i & 0xff;
+  const ui = boot('tauri://localhost/'), link = new ui.Anchor();
+  link.href = ui.URL.createObjectURL(new Blob([original])); link.download = '音色🎵.cassette.zip';
+  link.click(); ui.URL.revokeObjectURL(link.href);
+  const call = await ui.exportCall;
+  const packet = exportPacket(call);
+  assert.deepEqual(packet.header, {filename:link.download});
+  assert.equal(call.args.byteLength, original.byteLength + packet.headerLength + 4);
+  assert.ok(packet.headerLength > JSON.stringify(packet.header).length, 'Header length counts UTF-8 bytes');
+  assert.equal(Buffer.compare(Buffer.from(packet.bytes), Buffer.from(original)), 0);
+  assert.equal(ui.calls.length, 1);
+});
+test('oversized export rejects before reading the Blob or invoking native code', async () => {
+  const ui = boot('tauri://localhost/'), link = new ui.Anchor();
+  let reads = 0;
+  link.href = ui.URL.createObjectURL({size:128 * 1024 * 1024 + 1, arrayBuffer() {reads++; throw Error('Must not read');}});
+  link.download = 'huge.cassette.zip'; link.click();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reads, 0); assert.deepEqual(ui.calls, []);
+  assert.match(ui.status.textContent, /Could not save.*Export exceeds 128 MiB/);
+});
+test('oversized UTF-8 filename header rejects before reading the Blob', async () => {
+  const ui = boot('tauri://localhost/'), link = new ui.Anchor();
+  let reads = 0;
+  link.href = ui.URL.createObjectURL({size:1, arrayBuffer() {reads++; throw Error('Must not read');}});
+  link.download = '界'.repeat(1500); link.click();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reads, 0); assert.deepEqual(ui.calls, []);
+  assert.match(ui.status.textContent, /Could not save.*header exceeds 4096 bytes/);
+});
+test('cancelled native binary save reports cancellation without browser navigation', async () => {
+  const ui = boot('tauri://localhost/', false, false, false, null), link = new ui.Anchor();
+  link.href = ui.URL.createObjectURL(new Blob([])); link.download = 'empty.bin'; link.click();
+  await ui.exportCall;
+  await new Promise(resolve => setImmediate(resolve));
+  const packet = exportPacket(ui.calls[0]);
+  assert.equal(packet.bytes.byteLength, 0);
+  assert.equal(ui.status.textContent, 'Save cancelled.');
+  assert.equal(ui.calls.includes('browser-click'), false);
 });
 test('remote pages and subframes retain browser behavior without native hooks', () => {
   for (const [url, frame] of [['https://example.com/', false], ['http://localhost:8890/', false], ['tauri://other/', false], ['tauri://localhost/', true]]) {

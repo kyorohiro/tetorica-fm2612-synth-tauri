@@ -6,6 +6,15 @@ use tauri::menu::Menu;
 use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
+const MAX_EXPORT_BYTES: usize = 128 * 1024 * 1024;
+const MAX_EXPORT_HEADER_BYTES: usize = 4 * 1024;
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExportHeader {
+    filename: String,
+}
+
 fn local_origin(scheme: &str, host: Option<&str>) -> bool {
     (scheme == "tauri" && host == Some("localhost"))
         || (["http", "https"].contains(&scheme) && host == Some("tauri.localhost"))
@@ -35,6 +44,34 @@ fn export_name(filename: &str) -> String {
     }
 }
 
+fn validate_export_size(length: usize) -> Result<(), String> {
+    if length > MAX_EXPORT_BYTES {
+        return Err("Export exceeds 128 MiB".into());
+    }
+    Ok(())
+}
+
+// Raw IPC avoids representing each file byte as a JSON number. The small
+// UTF-8 header is length-prefixed; the remaining bytes are the original file.
+fn parse_export_packet(packet: &[u8]) -> Result<(String, &[u8]), String> {
+    if packet.len() < 4 {
+        return Err("Export packet is missing its header length".into());
+    }
+    let header_length = u32::from_le_bytes(packet[..4].try_into().unwrap()) as usize;
+    if header_length == 0 || header_length > MAX_EXPORT_HEADER_BYTES {
+        return Err("Export header must contain 1..4096 bytes".into());
+    }
+    let data_offset = 4 + header_length;
+    if data_offset > packet.len() {
+        return Err("Export packet contains a truncated header".into());
+    }
+    let bytes = &packet[data_offset..];
+    validate_export_size(bytes.len())?;
+    let header: ExportHeader = serde_json::from_slice(&packet[4..data_offset])
+        .map_err(|error| format!("Invalid export header: {error}"))?;
+    Ok((export_name(&header.filename), bytes))
+}
+
 #[tauri::command]
 async fn save_export(
     window: tauri::WebviewWindow,
@@ -42,10 +79,31 @@ async fn save_export(
     bytes: Vec<u8>,
 ) -> Result<Option<String>, String> {
     allowed(&window)?;
-    if bytes.len() > 128 * 1024 * 1024 {
-        return Err("Export exceeds 128 MiB".into());
-    }
+    validate_export_size(bytes.len())?;
     let filename = export_name(&filename);
+    save_export_file(window, filename, bytes).await
+}
+
+#[tauri::command]
+async fn save_export_binary(
+    window: tauri::WebviewWindow,
+    request: tauri::ipc::Request<'_>,
+) -> Result<Option<String>, String> {
+    allowed(&window)?;
+    let tauri::ipc::InvokeBody::Raw(packet) = request.body() else {
+        return Err("Export requires a binary file packet".into());
+    };
+    let (filename, bytes) = parse_export_packet(packet)?;
+    // The request is borrowed by Tauri. Own the file bytes before handing them
+    // to the blocking native dialog task; no JSON conversion is involved.
+    save_export_file(window, filename, bytes.to_vec()).await
+}
+
+async fn save_export_file(
+    window: tauri::WebviewWindow,
+    filename: String,
+    bytes: Vec<u8>,
+) -> Result<Option<String>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let chosen = window
             .dialog()
@@ -124,6 +182,7 @@ fn main() {
         )
         .invoke_handler(tauri::generate_handler![
             save_export,
+            save_export_binary,
             reload_window,
             window_pin_state,
             set_window_pin,
@@ -195,6 +254,80 @@ mod tests {
         assert_eq!(export_name("C:\\voice.vgi"), "voice.vgi");
         assert_eq!(export_name("\n"), "export.bin");
         assert_eq!(export_name(".."), "export.bin");
+        assert_eq!(
+            export_name("../../音色\0.cassette.zip"),
+            "音色.cassette.zip"
+        );
+        assert_eq!(export_name(&"界".repeat(200)).chars().count(), 160);
+    }
+    fn binary_export_packet(header: &[u8], bytes: &[u8]) -> Vec<u8> {
+        let mut packet = (header.len() as u32).to_le_bytes().to_vec();
+        packet.extend_from_slice(header);
+        packet.extend_from_slice(bytes);
+        packet
+    }
+    #[test]
+    fn binary_export_keeps_utf8_filename_and_original_file_bytes() {
+        let header = serde_json::to_vec(&serde_json::json!({
+            "filename": "../../音色.cassette.zip"
+        }))
+        .unwrap();
+        let original: Vec<u8> = (0..=255).collect();
+        let packet = binary_export_packet(&header, &original);
+        let (filename, bytes) = parse_export_packet(&packet).unwrap();
+        assert_eq!(filename, "音色.cassette.zip");
+        assert_eq!(bytes, original);
+        // Parsing borrows the data instead of making another full-size copy.
+        assert_eq!(bytes.as_ptr(), packet[4 + header.len()..].as_ptr());
+    }
+    #[test]
+    fn binary_export_accepts_empty_files_without_confusing_header_with_data() {
+        let packet = binary_export_packet(br#"{"filename":"empty.bin"}"#, &[]);
+        let (filename, bytes) = parse_export_packet(&packet).unwrap();
+        assert_eq!(filename, "empty.bin");
+        assert!(bytes.is_empty());
+    }
+    #[test]
+    fn binary_export_rejects_missing_oversized_or_truncated_headers() {
+        for length in 0..4 {
+            assert!(parse_export_packet(&vec![0; length]).is_err());
+        }
+        assert!(parse_export_packet(&[0; 4]).is_err());
+        for length in [MAX_EXPORT_HEADER_BYTES as u32 + 1, u32::MAX] {
+            assert!(parse_export_packet(&length.to_le_bytes()).is_err());
+        }
+        let mut truncated = 20u32.to_le_bytes().to_vec();
+        truncated.extend_from_slice(b"{}");
+        assert!(parse_export_packet(&truncated)
+            .unwrap_err()
+            .contains("truncated header"));
+    }
+    #[test]
+    fn binary_export_header_requires_valid_utf8_json_with_only_a_filename() {
+        for header in [
+            b"not json".as_slice(),
+            b"\xff".as_slice(),
+            br#"[]"#.as_slice(),
+            br#"{}"#.as_slice(),
+            br#"{"filename":1}"#.as_slice(),
+            br#"{"filename":"a","path":"/tmp"}"#.as_slice(),
+            br#"{"filename":"a","filename":"b"}"#.as_slice(),
+        ] {
+            let packet = binary_export_packet(header, b"file data");
+            assert!(parse_export_packet(&packet)
+                .unwrap_err()
+                .starts_with("Invalid export header:"));
+        }
+    }
+    #[test]
+    fn export_size_limit_is_shared_by_legacy_and_binary_saves() {
+        assert!(validate_export_size(0).is_ok());
+        assert!(validate_export_size(16 * 1024 * 1024).is_ok());
+        assert!(validate_export_size(MAX_EXPORT_BYTES).is_ok());
+        assert_eq!(
+            validate_export_size(MAX_EXPORT_BYTES + 1).unwrap_err(),
+            "Export exceeds 128 MiB"
+        );
     }
     #[test]
     fn pin_confirmation_waits_for_queued_native_change() {
