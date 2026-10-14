@@ -1,9 +1,16 @@
+import {attachChipClock, CHIP_CLOCKS} from './playground_chip_clock.js';
 /** Worker/Node: performance state and FM/PSG register generation.
  * No DOM, AudioNode or main-thread RPC. Observers are fire-and-forget.
  */
 import {YM2612Synth} from './ym2612synth.js';
 import {OPNFMSynth} from './opn_fm_synth.js';
 import {createSegaPsgApi} from './segapsg_api.js';
+/**
+ * Create Worker-side FM/PSG controls that batch ordered writes to a Worklet port.
+ * Stop cancels outstanding DAC requests and mutes hardware; resume permits new work.
+ * @param {{port: MessagePort, capabilities: {chip?: 'ym2612' | 'ym2203' | 'ym2610', fmChannels?: number, psg?: boolean, dac?: boolean}, state?: {channels: object[], lfo: object, modeRegister?: number, dac?: object}, observe?: (event: {method: string, args: unknown[]}) => void}} options Port, chip capabilities, optional snapshot and observer.
+ * @returns FM/PSG controls, raw synth state, write sender and lifecycle methods.
+ */
 export function createWorkerChip({port,capabilities,state,observe=()=>{}}){
  let enabled=false,batch=null;
  let requestId=0, stopped=false;
@@ -27,10 +34,11 @@ export function createWorkerChip({port,capabilities,state,observe=()=>{}}){
  },write(port,register,value){send({type:'write',port,register,value});},reset(){send({type:'reset'});}};
  const name=capabilities.chip??'ym2612';
  const raw=name==='ym2612'?new YM2612Synth({transport}):new OPNFMSynth({transport,chipName:name,channelCount:name==='ym2203'?3:6,portCount:name==='ym2203'?1:2,supportsPan:name!=='ym2203',supportsLfo:name!=='ym2203'});
- function adoptState(state){if(!state)return;raw.channels=structuredClone(state.channels);raw.lfo=structuredClone(state.lfo);raw._modeRegister=state.modeRegister??0;if(state.dac)Object.assign(raw.dac ??= {}, structuredClone(state.dac));}
+ function adoptState(state){if(!state)return;if(state.clock!==undefined)raw._adoptClock(state.clock);raw.channels=structuredClone(state.channels);raw.lfo=structuredClone(state.lfo);raw._modeRegister=state.modeRegister??0;if(state.dac)Object.assign(raw.dac ??= {}, structuredClone(state.dac));}
+ attachChipClock(raw, port, state?.clock ?? CHIP_CLOCKS[name], {primary:true,batch:true});
  adoptState(state);
  enabled=true;
- const channelMethods=new Set(['setPreset','setOperator','setOperators','setAlgo','setPan','setModulation','setFrequency','keyOn','keyOff','noteOn','noteOff']);
+ const channelMethods=new Set(['setPreset','setOperator','setOperators','setAlgo','setPan','setModulation','setFrequency','setNote','setBlockFnum','noteOnRaw','keyOn','keyOff','noteOn','noteOff']);
  function invoke(method,args){
   if(typeof raw[method]!=='function'||method.startsWith('_')||['setHooks'].includes(method))throw new Error(`Unsupported fm method: ${method}`);
   const physical=args.slice();
@@ -38,22 +46,23 @@ export function createWorkerChip({port,capabilities,state,observe=()=>{}}){
   batch=[];
   let result;
   try{
-   if((method==='noteOn'||method==='keyOn') && mutedChannels.delete(physical[0])) {
+   if((method==='noteOn'||method==='noteOnRaw'||method==='keyOn') && mutedChannels.delete(physical[0])) {
     // Stop mutes the device immediately without destroying the saved patch.
     raw.channels[physical[0]].operators.forEach((operator,index)=>raw.setOperator(physical[0],index,{tl:operator.tl}));
    }
    result=raw[method](...physical);
   }finally{const commands=batch;batch=null;if(commands.length)port.postMessage(commands);}
+  if (method === 'setClock') return result.then(() => observe({method,args:structuredClone(args)}));
   observe({method,args:structuredClone(args)});
   return result;
  }
- const fm=new Proxy({}, {get:(_t,method)=> method==='dac'?raw.dac:(...args)=>invoke(String(method),args)});
+ const fm=new Proxy({}, {get:(_t,method)=> method==='clock'?raw.clock:method==='dac'?raw.dac:(...args)=>invoke(String(method),args)});
  const psg=capabilities.psg?createSegaPsgApi({write:value=>send({type:'psg-write',value}),reset:()=>send({type:'psg-reset'}),resetAll:()=>fm.reset()}):null;
  return {fm,psg,raw,send,adoptState,
   resume(){stopped=false;},
   write(...args){if(args.length===2)return fm.write(0,...args);if(args.length===3)return fm.write(...args);throw new Error('write expects register,value or port,register,value');},
   stop(){
-   stopped=true;
+   stopped=true;raw._cancelClockRequests('Run stopped');
    for(const pending of requests.values())pending.reject(new Error('Run stopped'));
    requests.clear();
    send({type:'clear-scheduled-writes'});send({type:'clear-dac-playback'});

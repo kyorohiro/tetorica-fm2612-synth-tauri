@@ -16,7 +16,8 @@
         "title": "Tetorica FM2612 Synth",
         "width": 1280,
         "height": 900,
-        "dragDropEnabled": false
+        "dragDropEnabled": false,
+        "create": false
       }
     ],
     "security": {

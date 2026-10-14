@@ -1,3 +1,5 @@
+import {bendPitch} from './synth_pitch_bend.js';
+
 export function createSynthInputController({
   getKeyLayout,
   findLayoutEntry,
@@ -8,6 +10,8 @@ export function createSynthInputController({
   voices,
   getAudioReadyPromise,
   getSynth,
+  getPitchBend = () => 0,
+  isInputEnabled = () => true,
   ensureAudioReady,
   chooseVoice,
   updateKeyboardVisuals,
@@ -18,6 +22,7 @@ export function createSynthInputController({
   onToggleRecord,
 }) {
   async function pressKey(key) {
+    if (!isInputEnabled()) return;
     heldKeys.add(key);
     const keyLayout =
       getKeyLayout();
@@ -91,10 +96,12 @@ export function createSynthInputController({
       }
     }
 
+    voice.basePitch = {...entry.pitch};
+    const pitch = bendPitch(voice.basePitch, getPitchBend());
     synth.noteOn(
       voice.channel,
-      entry.pitch.block,
-      entry.pitch.fnum
+      pitch.block,
+      pitch.fnum
     );
 
     voice.held = true;
@@ -210,6 +217,8 @@ export function createSynthInputController({
   }
 
   function handleKeyDown(event) {
+    // Leave native application shortcuts (for example Cmd+Q) to the host.
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
     const key =
       event.key.toLowerCase();
     const keyLayout =

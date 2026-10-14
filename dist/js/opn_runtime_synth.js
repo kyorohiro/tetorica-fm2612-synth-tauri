@@ -7,6 +7,8 @@
 import { TetoricaAudioRuntime } from "./tetorica_audio_runtime.js?v=native-fx-1";
 import { OPNWorkletTransport } from "./opn_fm_synth.js";
 
+/** @typedef {Pick<import('./megasynth.js').MegaSynthOptions,'audioContext'|'outputNode'|'sampleOutputNode'|'masterVolume'|'mixer'|'workletUrl'> & {wasmUrl?:string,rhythmRom?:Uint8Array,rhythmRomUrl?:string}} OPNRuntimeSynthOptions */
+
 const MAX_MASTER_VOLUME = 3.8;
 
 /**
@@ -14,6 +16,7 @@ const MAX_MASTER_VOLUME = 3.8;
  * provide their worklet protocol and high-level FM constructor.
  */
 export class OPNRuntimeSynth {
+  /** @param {OPNRuntimeSynthOptions|undefined} options */
   constructor(options = {}, config) {
     this.chip = config.chip;
     this.capabilities = Object.freeze({
@@ -28,6 +31,7 @@ export class OPNRuntimeSynth {
       outputNode: options.outputNode,
       sampleOutputNode: options.sampleOutputNode,
       masterVolume: clampMasterVolume(options.masterVolume ?? 1),
+      mixer: options.mixer,
     });
     this.workletUrl = options.workletUrl ?? config.workletUrl;
     this.wasmUrl = options.wasmUrl ?? config.wasmUrl;
@@ -37,6 +41,7 @@ export class OPNRuntimeSynth {
     this.FMSynth = config.FMSynth;
     this.rhythmRom = options.rhythmRom;
     this.rhythmRomUrl = options.rhythmRomUrl ?? config.rhythmRomUrl;
+    this.mixerRelease = null;
     this.node = null;
     this.fm = null;
     this.psg = null;
@@ -58,6 +63,8 @@ export class OPNRuntimeSynth {
     this.noise = this.audio.createNoiseApi();
   }
 
+  /** @returns {import('./soundchip_mixer.js').SoundChipMixer} */
+  get mixer() { return this.audio.mixer; }
   get audioContext() { return this.audio.audioContext; }
   set audioContext(value) { this.audio.audioContext = value; }
   get ownsAudioContext() { return this.audio.ownsAudioContext; }
@@ -78,6 +85,7 @@ export class OPNRuntimeSynth {
         } catch (error) {
           if (this.initializationController === controller) {
             controller.abort();
+            this.mixerRelease?.(); this.mixerRelease = null;
             this.node?.disconnect();
             this.node?.port.close();
             this.node = null;
@@ -113,6 +121,7 @@ export class OPNRuntimeSynth {
     return () => this.listeners.delete(listener);
   }
   removeListener(listener) { this.listeners.delete(listener); }
+  /** @param {number} volume */
   setMasterVolume(volume) { return this.audio.setMasterVolume(clampMasterVolume(volume)); }
   getMasterVolume() { return this.audio.masterVolume; }
   setFXChain(effects = [], options = {}) { return this.audio.setFXChain(effects, options); }
@@ -137,6 +146,7 @@ export class OPNRuntimeSynth {
   async #close() {
     this.audio.closeMedia();
     this.audio.disposeFXChain();
+    this.mixerRelease?.(); this.mixerRelease = null;
     this.fm?.transport.dispose?.();
     this.node?.disconnect();
     this.node?.port.close();
@@ -177,7 +187,7 @@ export class OPNRuntimeSynth {
       outputChannelCount: [2],
     });
     this.audio.ensureRouting(this.audioContext);
-    this.audio.connectChipOutput(this.node);
+    this.mixerRelease = this.mixer.connect(this.chip, this.chip, this.node, this.audio.masterInputNode, this.audioContext);
     const ready = this.#waitForWorkletReady(this.node, signal);
     ready.catch(() => {});
     this.node.port.postMessage({ type: "initialize", wasmBinary, rhythmRom }, [wasmBinary]);
@@ -189,6 +199,7 @@ export class OPNRuntimeSynth {
         chipName: this.chipName,
       }),
     });
+    Object.defineProperty(this.fm, 'id', {value: this.chip, enumerable: true});
   }
 
   #waitForWorkletReady(node, signal) {

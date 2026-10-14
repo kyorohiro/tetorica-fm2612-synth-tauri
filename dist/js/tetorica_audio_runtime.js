@@ -1,3 +1,4 @@
+import {SoundChipMixer} from './soundchip_mixer.js';
 /**
  * @file tetorica_audio_runtime.js
  * 実行環境: Browser（音声処理時）
@@ -6,7 +7,7 @@
  */
 import {samplePCM} from "./native_sample.js";
 import * as fx from "./megasynth_fx.js";
-import {createNativeFXRack} from "./native_fx_rack.js";
+import {createNativeFXRack} from "./native_fx_rack.js?v=prepared-fx-rerun-2";
 
 /**
  * Chip-independent browser audio state shared by Tetorica synths.
@@ -15,14 +16,21 @@ import {createNativeFXRack} from "./native_fx_rack.js";
  * the mutable state so chip synths can compose it without changing callers.
  */
 export class TetoricaAudioRuntime {
+  /** @param {{audioContext?:AudioContext|null,outputNode?:AudioNode|null,sampleOutputNode?:AudioNode|null,masterVolume?:number,mixer?:SoundChipMixer}} [options] */
   constructor(options = {}) {
     this.ownsAudioContext = !options.audioContext;
     this.audioContext = options.audioContext ?? null;
     this.outputNode = options.outputNode ?? null;
     this.sampleOutputNode = options.sampleOutputNode ?? null;
     this.masterVolume = options.masterVolume ?? 1;
+    // Host listening level is independent of a script's master gain.
+    this.listeningVolume = 1;
+    /** @type {SoundChipMixer} */
+    this.mixer = options.mixer ?? new SoundChipMixer();
     this.masterInputNode = null;
     this.masterOutputNode = null;
+    /** @type {Set<AudioNode>} Non-audible observation branches after FX and master volume. */
+    this.outputMonitors = new Set();
     this.fxChain = [];
     this.sampleBuffers = new Map();
     this.sampleVoices = new Set();
@@ -39,6 +47,7 @@ export class TetoricaAudioRuntime {
     this.stream = stream;
   }
 
+  /** @param {string} name */
   stopSample(name) {
     if(name==null)this.nativeFX?.sample.stopAll();else this.nativeFX?.sample.stop(name);
     for (const voice of this.sampleVoices) {
@@ -46,6 +55,7 @@ export class TetoricaAudioRuntime {
     }
   }
 
+  /** @param {string} name */
   unloadSample(name) {
     const normalizedName = String(name);
     this.stopSample(normalizedName);
@@ -53,16 +63,20 @@ export class TetoricaAudioRuntime {
     return this.sampleBuffers.delete(normalizedName);
   }
 
+  /** @param {string} name
+   * @param {AudioBuffer} buffer */
   storeSample(name, buffer) {
     this.nativeFX?.sample.unload(name);
     this.sampleBuffers.set(name, buffer);
     return buffer;
   }
 
+  /** @param {string} name */
   getSample(name) {
     return this.sampleBuffers.get(String(name)) ?? null;
   }
 
+  /** @param {string} name */
   hasSample(name) {
     return this.sampleBuffers.has(String(name));
   }
@@ -524,10 +538,32 @@ export class TetoricaAudioRuntime {
 
     const now =
       this.audioContext.currentTime;
+    // Source positions are seconds in the material; fades are output seconds.
+    // A bounded loop has the same natural release as a one-shot sample.
+    const sourceRemaining = source.loop
+      ? Infinity
+      : Math.max(0, buffer.duration - offset);
+    const naturalSeconds = Math.min(sourceRemaining, duration ?? Infinity) /
+      Math.abs(playbackRate);
+    const hasNaturalRelease = fadeOut > 0 && Number.isFinite(naturalSeconds);
+    const envelopeAt = elapsed => Math.min(
+      1,
+      fadeIn > 0 ? Math.max(0, elapsed) / fadeIn : 1,
+      hasNaturalRelease ? Math.max(0, naturalSeconds - elapsed) / fadeOut : 1
+    );
     gainNode.gain.cancelScheduledValues(
       now
     );
-    if (fadeIn > 0) {
+    if (hasNaturalRelease && naturalSeconds <= 0) {
+      gainNode.gain.setValueAtTime(0, now);
+    } else if (hasNaturalRelease && fadeIn > 0 && fadeIn + fadeOut > naturalSeconds) {
+      // Short samples may end before the attack completes. Intersect the
+      // attack/release ramps instead of jumping up to full gain at release.
+      const peakTime = naturalSeconds * fadeIn / (fadeIn + fadeOut);
+      gainNode.gain.setValueAtTime(0, now);
+      gainNode.gain.linearRampToValueAtTime(gain * envelopeAt(peakTime), now + peakTime);
+      gainNode.gain.linearRampToValueAtTime(0, now + naturalSeconds);
+    } else if (fadeIn > 0) {
       gainNode.gain.setValueAtTime(
         0,
         now
@@ -538,9 +574,15 @@ export class TetoricaAudioRuntime {
       );
     } else {
       gainNode.gain.setValueAtTime(
-        gain,
+        gain * envelopeAt(0),
         now
       );
+    }
+    if (hasNaturalRelease && naturalSeconds > 0 && fadeIn + fadeOut <= naturalSeconds) {
+      gainNode.gain.setValueAtTime(gain, now + naturalSeconds - fadeOut);
+      gainNode.gain.linearRampToValueAtTime(0, now + naturalSeconds);
+    } else if (hasNaturalRelease && naturalSeconds > 0 && fadeIn <= 0) {
+      gainNode.gain.linearRampToValueAtTime(0, now + naturalSeconds);
     }
 
     source.connect(gainNode);
@@ -572,15 +614,16 @@ export class TetoricaAudioRuntime {
             stopTime
           );
           gainNode.gain.setValueAtTime(
-            gainNode.gain.value,
+            gain * envelopeAt(stopTime - now),
             stopTime
           );
+          const stopEnd = Math.min(stopTime + fadeOut, now + naturalSeconds);
           gainNode.gain.linearRampToValueAtTime(
             0,
-            stopTime + fadeOut
+            Math.max(stopTime, stopEnd)
           );
           source.stop(
-            stopTime + fadeOut
+            Math.max(stopTime, stopEnd)
           );
         } else {
           source.stop();
@@ -852,6 +895,7 @@ export class TetoricaAudioRuntime {
     await element.play();
   }
 
+  /** @param {string} name */
   pauseStream(name) {
     for (const entry of this.streamEntries.values()) {
       if (
@@ -863,6 +907,7 @@ export class TetoricaAudioRuntime {
     }
   }
 
+  /** @param {string} name */
   stopStream(name) {
     for (const entry of this.streamEntries.values()) {
       if (
@@ -874,6 +919,7 @@ export class TetoricaAudioRuntime {
     }
   }
 
+  /** @param {string} name */
   unloadStream(name) {
     const entry =
       this.streamEntries.get(
@@ -901,16 +947,18 @@ export class TetoricaAudioRuntime {
     );
   }
 
+  /** @param {AudioContext} audioContext */
   ensureRouting(audioContext) {
     this.audioContext = audioContext;
     if (!this.masterInputNode) this.masterInputNode = audioContext.createGain();
     if (!this.masterOutputNode) {
       this.masterOutputNode = audioContext.createGain();
-      this.masterOutputNode.gain.value = this.masterVolume;
+      this.masterOutputNode.gain.value = this.masterVolume * this.listeningVolume;
     }
     this.rebuildFXChain();
   }
 
+  /** @param {AudioNode} node */
   connectChipOutput(node) {
     if (!node || !this.masterInputNode) throw new Error("Audio routing is not ready");
     node.connect(this.masterInputNode);
@@ -948,14 +996,57 @@ export class TetoricaAudioRuntime {
     for (const effect of previous) effect?.dispose?.();
   }
 
+  /** @param {AudioNode|null} [node] */
   connectOutput(node = null) {
     this.outputNode = node ?? this.outputNode ?? this.audioContext?.destination ?? null;
     this.rebuildFXChain();
   }
 
+  /**
+   * Observe the mixed output without changing its destination. Reconnected after FX changes.
+   * @param {AudioNode} node Observation input in this runtime's AudioContext.
+   * @returns {() => void} Disconnect this observation branch.
+   */
+  connectOutputMonitor(node) {
+    if (node.context !== this.audioContext) throw new Error("Output monitor must use the same AudioContext");
+    this.outputMonitors.add(node);
+    this.masterOutputNode?.connect(node);
+    return () => {
+      this.outputMonitors.delete(node);
+      try { this.masterOutputNode?.disconnect(node); } catch {}
+    };
+  }
+
+  /** @param {number} volume Requested gain; running output approaches it with a 1 ms time constant (~99.3% in 5 ms). */
   setMasterVolume(volume) {
     this.masterVolume = volume;
-    if (this.masterOutputNode) this.masterOutputNode.gain.value = volume;
+    const outputVolume = volume * this.listeningVolume;
+    const gain = this.masterOutputNode?.gain;
+    if (!gain) return volume;
+    const now = this.audioContext?.currentTime;
+    if (this.audioContext?.state !== "running" || !Number.isFinite(now) ||
+        typeof gain.setTargetAtTime !== "function") {
+      // Before audio starts (or while suspended), keep initialization immediate.
+      const at = Number.isFinite(now) ? now : 0;
+      gain.cancelScheduledValues?.(at);
+      if (typeof gain.setValueAtTime === "function") gain.setValueAtTime(outputVolume, at);
+      else gain.value = outputVolume;
+      return volume;
+    }
+    // Native automation starts from the running gain. Avoid JS-side interpolation
+    // and future ramp endpoints, which can step when controls arrive late.
+    gain.setTargetAtTime(outputVolume, now, .001);
+    return volume;
+  }
+
+  /** Host playback level (0..8), retained when scripts set their master gain.
+   * The final output and its monitors include both gains. @param {number} volume */
+  setListeningVolume(volume) {
+    if (!Number.isFinite(volume) || volume < 0 || volume > 8) {
+      throw new RangeError('Listening volume must be between 0 and 8');
+    }
+    this.listeningVolume = volume;
+    this.setMasterVolume(this.masterVolume);
     return volume;
   }
 
@@ -967,6 +1058,10 @@ export class TetoricaAudioRuntime {
   }
 
   closeMedia() {
+    for (const node of this.outputMonitors) {
+      try { this.masterOutputNode?.disconnect(node); } catch {}
+    }
+    this.outputMonitors.clear();
     this.sample?.stopAll?.();
     this.sampleBuffers.clear();
     this.stream?.stop?.();
@@ -991,6 +1086,7 @@ export class TetoricaAudioRuntime {
     if (target) {
       current.connect(this.masterOutputNode);
       this.masterOutputNode.connect(target);
+      for (const node of this.outputMonitors) this.masterOutputNode.connect(node);
     }
   }
 }

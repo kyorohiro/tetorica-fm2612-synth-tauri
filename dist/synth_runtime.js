@@ -10,6 +10,7 @@ export function createVoices(
       held: false,
       key: null,
       startedAt: 0,
+      basePitch: null,
     })
   );
 }
@@ -53,6 +54,12 @@ export function attachOutputEnvelopeTap({
       }
     }
   );
+
+  // Worklets send envelope data only when a display explicitly requests it.
+  megaSynth.setOutputEnvelopeOptions({
+    samplesPerPoint: 128,
+    pointsPerMessage: 16,
+  });
 }
 
 export function chooseVoice(voices) {
@@ -104,6 +111,7 @@ export function resetVoiceState({
     voice.held = false;
     voice.key = null;
     voice.startedAt = 0;
+    voice.basePitch = null;
   }
 
   nextVoiceSearchStart = 0;

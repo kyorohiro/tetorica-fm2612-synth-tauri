@@ -1,6 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod audio;
+
 use tauri::menu::Menu;
+use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
 fn local_origin(scheme: &str, host: Option<&str>) -> bool {
@@ -64,6 +67,7 @@ async fn save_export(
 #[tauri::command]
 fn reload_window(window: tauri::WebviewWindow) -> Result<(), String> {
     allowed(&window)?;
+    window.state::<audio::Audio>().shutdown();
     window.reload().map_err(|error| error.to_string())
 }
 
@@ -75,8 +79,52 @@ fn main() {
                 .js_init_script(include_str!("../../desktop/desktop-interface.js"))
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![save_export, reload_window])
+        .invoke_handler(tauri::generate_handler![
+            save_export,
+            reload_window,
+            audio::audio_devices,
+            audio::audio_start,
+            audio::audio_write,
+            audio::audio_poll,
+            audio::audio_stop,
+        ])
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                window.state::<audio::Audio>().shutdown();
+            }
+        })
         .setup(|app| {
+            app.manage(audio::Audio::default());
+            // Desktop-only extensions leave the pinned Synth assets untouched.
+            tauri::WebviewWindowBuilder::from_config(app, &app.config().app.windows[0])?
+                .on_web_resource_request(|request, response| {
+                    let local = local_origin(
+                        request.uri().scheme_str().unwrap_or(""),
+                        request.uri().host(),
+                    );
+                    if local && request.uri().path() == "/desktop-audio-worklet.js" {
+                        *response.status_mut() = tauri::http::StatusCode::OK;
+                        *response.body_mut() = std::borrow::Cow::Owned(
+                            include_bytes!("../../desktop/audio-worklet.js").to_vec(),
+                        );
+                        response
+                            .headers_mut()
+                            .insert("content-type", "text/javascript".parse().unwrap());
+                        response.headers_mut().remove("content-length");
+                    }
+                    if local
+                        && request.uri().path() == "/synth.js"
+                        && response.status().is_success()
+                    {
+                        let mut bytes = response.body().to_vec();
+                        bytes.extend_from_slice(b"\n;\n");
+                        bytes.extend_from_slice(include_bytes!("../../desktop/audio-interface.js"));
+                        *response.body_mut() = std::borrow::Cow::Owned(bytes);
+                        response.headers_mut().remove("content-length");
+                        response.headers_mut().remove("etag");
+                    }
+                })
+                .build()?;
             app.set_menu(Menu::default(app.handle())?)?;
             Ok(())
         })

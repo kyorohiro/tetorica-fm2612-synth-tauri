@@ -1,3 +1,4 @@
+import {noteToHz} from './soundchip_pitch.js';
 /**
  * @file segapsgsynth.js
  * 実行環境: Browser / Node.js
@@ -25,33 +26,41 @@ export class SegaPSGDirectTransport {
     if (!chip || typeof chip.write !== 'function') throw new TypeError('SegaPSGDirectTransport requires write(value)');
     this.chip = chip;
   }
+  /** @param {number} value */
   write(value) { this.chip.write(value); }
   reset() { this.chip.reset(); }
 }
 
 /** Tone/noise register generation shared by Node.js and browser transports. */
 export class SegaPSGSynth {
-  /** @param {{transport: {write: function(number): void, reset?: function(): void, resetAll?: function(): void}}} options */
+  #attenuations = new Uint8Array(4);
+  #latched = 0;
+  /** @param {{transport: {clock?:number, write: (value: number) => void, reset?: () => void, resetAll?: () => void}}} [options] Ordered register transport. */
   constructor({transport} = {}) {
     if (!transport || typeof transport.write !== 'function') throw new TypeError('SegaPSGSynth requires a transport with write(value)');
     this.transport = transport;
   }
-  /** Write a raw PSG command byte. */
-  write(value) { return this.transport.write(normalizeByte(value)); }
-  reset() { return this.transport.reset?.(); }
-  resetAll() { return this.transport.resetAll?.(); }
+  /** Write a raw PSG command byte. @param {number} value */
+  write(value) {
+    const byte = normalizeByte(value);
+    if (byte & 128) this.#latched = (byte >> 4) & 7;
+    if (this.#latched & 1) this.#attenuations[this.#latched >> 1] = byte & 15;
+    return this.transport.write(byte);
+  }
+  reset() { const result = this.transport.reset?.(); this.#attenuations.fill(0); this.#latched = 0; return result; }
+  resetAll() { const result = this.transport.resetAll?.(); this.#attenuations.fill(0); this.#latched = 0; return result; }
   /** @param {number} channel Physical tone channel, 0..2.
    * @param {{note?: string, frequency?: number, period?: number, attenuation?: number, volume?: number}} [options]
    * @returns {number} Written 10-bit period, calculated using SEGAPSG_CLOCK.
    */
   tone(channel, options = {}) {
     const normalizedChannel = normalizeToneChannel(channel);
-    const period = resolveTonePeriod(options);
+    const period = resolveTonePeriod(options, this.transport.clock ?? SEGAPSG_CLOCK);
     const attenuation = resolveAttenuation(options);
     writeTone(this.write.bind(this), normalizedChannel, period, attenuation);
     return period;
   }
-  /** Set the exact 10-bit tone period without changing attenuation. Zero retains chip-specific behavior. */
+  /** Set the exact 10-bit tone period without changing attenuation. Zero retains chip-specific behavior. @param {number} channel @param {number} period */
   setPeriod(channel, period) {
     const ch = normalizeToneChannel(channel);
     if (!Number.isInteger(period) || period < 0 || period > 1023) throw new RangeError('PSG period must be 0..1023');
@@ -59,7 +68,24 @@ export class SegaPSGSynth {
     this.write(period >> 4);
     return period;
   }
-  /** Set attenuation only: 0 is loudest, 15 is silent; channel 3 is noise. */
+  /** Configure Hz, preserving attenuation. @param {number} channel @param {number} hz */
+  setFrequency(channel, hz) {
+    normalizeToneChannel(channel);
+    if (!Number.isFinite(hz) || hz <= 0) throw new RangeError('Frequency must be positive finite Hz');
+    return this.setPeriod(channel, psgPeriodFromFrequency(hz, this.transport.clock ?? SEGAPSG_CLOCK));
+  }
+  /** @param {number} channel @param {string|number} note */
+  setNote(channel, note) { return this.setFrequency(channel, noteToHz(note)); }
+  /** Restore the configured attenuation without changing pitch. @param {number} channel */
+  keyOn(channel) { const ch = normalizeToneChannel(channel); this.setAttenuation(ch, this.#attenuations[ch]); }
+  /** Silence while remembering the configured attenuation. @param {number} channel */
+  keyOff(channel) {
+    const ch = normalizeToneChannel(channel), attenuation = this.#attenuations[ch];
+    this.setAttenuation(ch, 15); this.#attenuations[ch] = attenuation;
+  }
+  /** @param {number} channel @param {string|number} note */
+  noteOn(channel, note) { this.setNote(channel, note); this.keyOn(channel); }
+  /** Set attenuation only: 0 is loudest, 15 is silent; channel 3 is noise. @param {number} channel @param {number} attenuation */
   setAttenuation(channel, attenuation) {
     if (!Number.isInteger(channel) || channel < 0 || channel > 3) throw new RangeError('PSG channel must be 0..3');
     writeAttenuation(this.write.bind(this), channel, normalizeAttenuation(attenuation));
@@ -72,8 +98,9 @@ export class SegaPSGSynth {
     this.write(0xe0 | mode);
     return mode;
   }
+  /** @param {number} channel */
   off(channel) {
-    writeAttenuation(this.write.bind(this), normalizeToneChannel(channel), 15);
+    this.keyOff(channel);
   }
   /** @param {{type?: "white"|"periodic", rate?: "low"|"medium"|"high"|"tone3", attenuation?: number, volume?: number}} [options]
    * @returns {number} Noise mode bits.
@@ -94,6 +121,7 @@ export class SegaPSGSynth {
     this.write(0xf0 | attenuation);
     return mode;
   }
+  /** @param {number} volume */
   noiseVolume(volume) {
     this.write(0xf0 | resolveAttenuation({ volume }));
   }
@@ -102,24 +130,26 @@ export class SegaPSGSynth {
   }
 }
 
-export function psgPeriodFromFrequency(frequency) {
+/** @param {number} frequency */
+export function psgPeriodFromFrequency(frequency, clock = SEGAPSG_CLOCK) {
   const value = Number(frequency);
   if (!Number.isFinite(value) || value <= 0) {
     throw new Error(`PSG frequency must be a positive finite number, got ${frequency}`);
   }
-  return Math.max(1, Math.min(0x3ff, Math.round(SEGAPSG_CLOCK / (32 * value))));
+  return Math.max(1, Math.min(0x3ff, Math.round(clock / (32 * value))));
 }
 
-export function psgPeriodFromNote(note) {
+/** @param {string | number} note */
+export function psgPeriodFromNote(note, clock = SEGAPSG_CLOCK) {
   const match = /^([A-G](?:#|b)?)(-?\d+)$/.exec(String(note).trim());
   if (!match || NOTE_TO_SEMITONE[match[1]] === undefined) {
     throw new Error(`Unsupported PSG note: ${note}`);
   }
   const midi = (Number(match[2]) + 1) * 12 + NOTE_TO_SEMITONE[match[1]];
-  return psgPeriodFromFrequency(440 * 2 ** ((midi - 69) / 12));
+  return psgPeriodFromFrequency(440 * 2 ** ((midi - 69) / 12), clock);
 }
 
-function resolveTonePeriod(options) {
+function resolveTonePeriod(options, clock = SEGAPSG_CLOCK) {
   if (!options || typeof options !== "object") {
     throw new Error("psg.tone options must be an object");
   }
@@ -127,10 +157,10 @@ function resolveTonePeriod(options) {
     return normalizePeriod(options.period);
   }
   if (options.frequency !== undefined) {
-    return psgPeriodFromFrequency(options.frequency);
+    return psgPeriodFromFrequency(options.frequency, clock);
   }
   if (options.note !== undefined) {
-    return psgPeriodFromNote(options.note);
+    return psgPeriodFromNote(options.note, clock);
   }
   throw new Error("psg.tone requires period, frequency, or note");
 }
@@ -149,12 +179,17 @@ function resolveAttenuation(options) {
   return 15 - Math.round(volume * 15);
 }
 
+/** @param {number} channel
+ * @param {number} period
+ * @param {number} attenuation */
 function writeTone(write, channel, period, attenuation) {
   write(0x80 | (channel << 5) | (period & 0x0f));
   write((period >> 4) & 0x3f);
   writeAttenuation(write, channel, attenuation);
 }
 
+/** @param {number} channel
+ * @param {number} attenuation */
 function writeAttenuation(write, channel, attenuation) {
   write(0x90 | (channel << 5) | attenuation);
 }

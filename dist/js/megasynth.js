@@ -1,3 +1,6 @@
+import {chipMixGains} from './soundchip_mixer.js';
+import {createPWM32XAudio} from './playground_pwm_audio.js';
+import {createPWM32XClient} from './pwm32x_playback.js';
 /**
  * @file megasynth.js
  * 実行環境: Browser（メインスレッド）
@@ -16,7 +19,7 @@ import { createSegaPsgApi } from "./segapsg_api.js";
 import { createRf5c164Audio } from "./playground_rf5c164_audio.js";
 import { createRf5c164Client } from "./playground_rf5c164.js";
 import { samplePCM } from "./native_sample.js";
-import { TetoricaAudioRuntime } from "./tetorica_audio_runtime.js?v=native-fx-1";
+import { TetoricaAudioRuntime } from "./tetorica_audio_runtime.js?v=prepared-fx-rerun-2";
 export {
   createFXBranch,
   createBitcrusherFX,
@@ -45,8 +48,14 @@ const YM2612_NATIVE_SAMPLE_RATE =
   Math.floor(YM2612_CLOCK / 144);
 
 /**
+ * Chip-output RMS monitoring before browser FX and master volume, not the final
+ * output waveform. All sample counts use the AudioContext output sample rate.
+ * @typedef {{samplesPerPoint?: number, pointsPerMessage?: number, enabled?: boolean}} OutputEnvelopeOptions
+ */
+
+/**
  * @typedef {import("./megasynth_fx.js").AnyFXUnit} AnyFXUnit
- * @typedef {import("./ym2612synth.js").YM2612Synth} YM2612Synth
+ * @typedef {import("./ym2612synth.js").YM2612Synth} YM2612SynthType
  * @typedef {import("./ym2612synth.js").YM2612Transport} YM2612Transport
  */
 
@@ -63,6 +72,8 @@ const YM2612_NATIVE_SAMPLE_RATE =
  *   fadeOut?: number,
  *   pan?: number,
  * }} MegaSynthSamplePlayOptions
+ * Fade times are output seconds. fadeOut also fades the natural end of a
+ * one-shot or duration-limited loop; an unbounded loop fades only on stop.
  */
 
 /**
@@ -127,6 +138,10 @@ const YM2612_NATIVE_SAMPLE_RATE =
  */
 
 /**
+ * Browser output uses the AudioContext/device rate by default. outputSampleRate
+ * explicitly requests an output frame rate; an explicitly supplied legacy
+ * chipSampleRate still requests that rate. An injected audioContext owns its
+ * rate. None of these options change the chip master clock or note tuning.
  * @typedef {{
  *   audioContext?: AudioContext | null,
  *   outputNode?: AudioNode | null,
@@ -136,10 +151,14 @@ const YM2612_NATIVE_SAMPLE_RATE =
  *   ym2612WasmUrl?: string,
  *   segaPsgWasmUrl?: string | null,
  *   megaCD?: boolean,
+ *   mega32X?: boolean,
+ *   pwmOptions?: {clock?: number, gain?: number, outputMode?: "duty" | "dac"},
  *   rf5c164WasmUrl?: string,
  *   rf5c164WorkletUrl?: string,
  *   rf5c164Fetch?: typeof fetch,
+ *   outputSampleRate?: number,
  *   chipSampleRate?: number,
+ *   mixer?: import('./soundchip_mixer.js').SoundChipMixer,
  *   masterVolume?: number,
  *   sampleOutputNode?: AudioNode | null,
  * }} MegaSynthOptions
@@ -260,6 +279,7 @@ export class MegaSynth {
       outputNode: options.outputNode,
       sampleOutputNode: options.sampleOutputNode,
       masterVolume: clampMasterVolume(options.masterVolume ?? 1),
+      mixer: options.mixer,
     });
     for (const property of [
       "ownsAudioContext",
@@ -283,6 +303,7 @@ export class MegaSynth {
       });
     }
 
+    this.mixerReleases = [];
     this.workletUrl =
       options.workletUrl ?? "./js/ym2612-worklet.js";
     this.stereoWidthWorkletUrl =
@@ -304,6 +325,16 @@ export class MegaSynth {
       options.chipSampleRate ??
         YM2612_NATIVE_SAMPLE_RATE
     );
+    // The worklet already converts chip frames to the output clock. Let Web
+    // Audio use the device rate instead of requesting the unusual FM rate
+    // (53,267 Hz), which adds another resampling stage on the device path.
+    // Preserve an explicitly requested legacy chipSampleRate as output rate.
+    this.outputSampleRate = options.outputSampleRate ??
+      (options.chipSampleRate == null ? undefined : this.chipSampleRate);
+    if (options.outputSampleRate != null &&
+        (!Number.isInteger(this.outputSampleRate) || this.outputSampleRate < 8000 || this.outputSampleRate > 384000)) {
+      throw new RangeError('outputSampleRate must be an integer from 8000 to 384000');
+    }
 
     /**
      * Optional. When set, the worklet also loads a Sega PSG core and mixes
@@ -311,6 +342,10 @@ export class MegaSynth {
      * default except in Mega CD mode, so FM-only callers are unaffected.
      */
     this.megaCD = options.megaCD === true;
+    this.mega32X = options.mega32X === true;
+    this.pwmOptions = options.pwmOptions ?? {};
+    /** @type {(import("./pwm32x_playback.js").AsyncPWMAPI & {dispose(): void, readonly id: string}) | null} */
+    this.pwm = null; this.pwmDevice = null;
     this.segaPsgWasmUrl = options.segaPsgWasmUrl !== undefined
       ? options.segaPsgWasmUrl
       : this.megaCD ? resolveSiblingWorkletUrl(this.ym2612WasmUrl, 'segapsg_wasm.wasm') : null;
@@ -319,21 +354,24 @@ export class MegaSynth {
     this.rf5c164WorkletUrl = options.rf5c164WorkletUrl ??
       resolveSiblingWorkletUrl(this.workletUrl, 'rf5c164-worklet.js');
     this.rf5c164Fetch = options.rf5c164Fetch;
-    /** RF5C164 API after start() when megaCD is enabled; its methods return promises. */
+    /** RF5C164 API after start() when megaCD is enabled; its methods return promises.
+     * @type {(ReturnType<typeof createRf5c164Client> & {readonly id: string}) | null} */
     this.pcm = null;
     this.pcmDevice = null;
     this.pcmDecodeId = 0;
 
     this.node = null;
+    /** @type {{samplesPerPoint: number, pointsPerMessage: number, enabled: boolean} | null} */
+    this.outputEnvelopeOptions = null;
     this.recordingManager = null;
     this._recordingHooksInstalled =
       false;
     this.listeners = new Set();
 
-    /** @type {YM2612Synth | null} */
+    /** @type {(YM2612SynthType & {readonly id: string}) | null} */
     this.fm = null;
 
-    /** @type {{ write(value: number): void, reset(): void } | null} */
+    /** @type {(ReturnType<typeof createSegaPsgApi> & {readonly id: string}) | null} */
     this.psg = null;
 
     /** @type {MegaSynthSampleAPI} */
@@ -388,6 +426,7 @@ export class MegaSynth {
       } catch (error) {
         if (this.initializationController === controller) {
           controller.abort();
+          this.releaseMixerSources();
           this.#disposePcm();
           this.fm?.transport?.dispose?.();
           this.node?.disconnect();
@@ -442,6 +481,7 @@ export class MegaSynth {
    */
   reset() {
     this.fm?.reset();
+    if (this.pwm) return Promise.all([this.pwm.reset(), this.pcm?.reset()]).then(() => undefined);
     return this.pcm?.reset();
   }
 
@@ -519,6 +559,37 @@ export class MegaSynth {
   connectOutput(node = null) {
     this.audio.connectOutput(node);
 
+    return this;
+  }
+
+  /**
+   * Configure chip-output RMS messages (`output-envelope`, `rmsValues`) on
+   * node.port. Calling this enables monitoring unless enabled is false.
+   * samplesPerPoint: integer 1..65536 output frames per RMS point (default 512).
+   * pointsPerMessage: integer 1..1024 points per message (default 16).
+   * Omitted fields retain their previous values. Changes discard partial data.
+   * May be called before start() or during playback; settings survive close/start.
+   * This does not configure Playground's final-output AnalyserNode.
+   * @param {OutputEnvelopeOptions} options
+   * @returns {MegaSynth}
+   */
+  setOutputEnvelopeOptions(options) {
+    if (!options || typeof options !== 'object' || Array.isArray(options)) {
+      throw new TypeError('Output envelope options must be an object');
+    }
+    const previous = this.outputEnvelopeOptions;
+    const samplesPerPoint = options.samplesPerPoint === undefined ? previous?.samplesPerPoint ?? 512 : options.samplesPerPoint;
+    const pointsPerMessage = options.pointsPerMessage === undefined ? previous?.pointsPerMessage ?? 16 : options.pointsPerMessage;
+    const enabled = options.enabled === undefined ? true : options.enabled;
+    if (!Number.isInteger(samplesPerPoint) || samplesPerPoint < 1 || samplesPerPoint > 65536) {
+      throw new RangeError('samplesPerPoint must be an integer from 1 to 65536');
+    }
+    if (!Number.isInteger(pointsPerMessage) || pointsPerMessage < 1 || pointsPerMessage > 1024) {
+      throw new RangeError('pointsPerMessage must be an integer from 1 to 1024');
+    }
+    if (typeof enabled !== 'boolean') throw new TypeError('enabled must be a boolean');
+    this.outputEnvelopeOptions = {samplesPerPoint, pointsPerMessage, enabled};
+    this.node?.port.postMessage({type: 'set-output-envelope', ...this.outputEnvelopeOptions});
     return this;
   }
 
@@ -649,6 +720,7 @@ export class MegaSynth {
     this.recordingManager?.attachSynth(null);
     this.audio.closeMedia();
     this.audio.disposeFXChain();
+    this.releaseMixerSources();
     this.#disposePcm();
 
     this.fm?.transport?.dispose?.();
@@ -693,9 +765,8 @@ export class MegaSynth {
   }
 
   #createAudioContext() {
-    return new AudioContext({
-      sampleRate: this.chipSampleRate,
-    });
+    return new AudioContext(this.outputSampleRate === undefined
+      ? undefined : {sampleRate: this.outputSampleRate});
   }
 
   async #initialize(signal) {
@@ -808,6 +879,10 @@ export class MegaSynth {
     await workletReady;
     signal.throwIfAborted();
 
+    if (this.outputEnvelopeOptions) {
+      this.node.port.postMessage({type: 'set-output-envelope', ...this.outputEnvelopeOptions});
+    }
+
     const transport =
       new YM2612WorkletTransport(
         this.node
@@ -818,9 +893,11 @@ export class MegaSynth {
         transport,
       });
 
+    Object.defineProperty(this.fm, 'id', {value: 'ym2612', enumerable: true});
     if (psgWasmBinary) {
       const node = this.node;
       this.psg = createSegaPsgApi({
+        /** @param {number} value */
         write(value) {
           node.port.postMessage({
             type: "psg-write",
@@ -840,6 +917,12 @@ export class MegaSynth {
       });
     }
 
+    if(this.psg) Object.defineProperty(this.psg, 'id', {value: 'segapsg', enumerable: true});
+    for (const name of ['ym2612', ...(psgWasmBinary ? ['segapsg'] : [])]) {
+      this.mixerReleases.push(this.mixer.register(name, name, settings => {
+        this.node.port.postMessage({type: 'mixer-settings', name, gains: chipMixGains(settings)});
+      }));
+    }
     if (this.megaCD) {
       const device = await createRf5c164Audio(this.audioContext, this.masterInputNode, {
         wasmUrl: this.rf5c164WasmUrl, workletUrl: this.rf5c164WorkletUrl,
@@ -847,6 +930,8 @@ export class MegaSynth {
       });
       if (signal.aborted) { device.dispose(); signal.throwIfAborted(); }
       this.pcmDevice = device;
+      device.node.disconnect(this.masterInputNode);
+      this.mixerReleases.push(this.mixer.connect('rf5c164', 'rf5c164', device.node, this.masterInputNode, this.audioContext));
       this.pcm = createRf5c164Client(device.port, async source => {
         signal.throwIfAborted();
         if (source?.channels && source.sampleRate) return source;
@@ -862,11 +947,30 @@ export class MegaSynth {
         finally { this.sample.unload(name); }
       });
     }
+    if(this.pcm) Object.defineProperty(this.pcm, 'id', {value: 'rf5c164', enumerable: true});
+    if (this.mega32X) {
+      const device = await createPWM32XAudio(this.audioContext, this.masterInputNode, {...this.pwmOptions, signal});
+      if (signal.aborted) {device.dispose(); signal.throwIfAborted();}
+      this.pwmDevice = device;
+      device.node.disconnect(this.masterInputNode);
+      this.mixerReleases.push(this.mixer.connect('pwm', 'pwm', device.node, this.masterInputNode, this.audioContext));
+      this.pwm = createPWM32XClient(device.port);
+    }
+    if(this.pwm) Object.defineProperty(this.pwm, 'id', {value: 'pwm', enumerable: true});
     this.#ensureRecordingManager();
     this.#installRecordingHooks();
   }
 
+  /** @returns {import('./soundchip_mixer.js').SoundChipMixer} */
+  get mixer() { return this.audio.mixer; }
+
+  releaseMixerSources() {
+    for (const release of this.mixerReleases.splice(0)) release();
+  }
+
   #disposePcm() {
+    this.pwm?.dispose(); this.pwm = null;
+    this.pwmDevice?.dispose(); this.pwmDevice = null;
     this.pcm?.dispose();
     this.pcm = null;
     this.pcmDevice?.dispose();

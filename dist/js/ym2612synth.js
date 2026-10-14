@@ -1,3 +1,4 @@
+import {noteToHz, opnPitchFromHz} from './soundchip_pitch.js';
 import {YM2612Dac, YM2612DacPlayer} from "./ym2612_dac.js";
 /**
  * @file ym2612synth.js
@@ -72,6 +73,7 @@ import {YM2612Dac, YM2612DacPlayer} from "./ym2612_dac.js";
 
 /**
  * @typedef {{
+ *   clock?: number,
  *   transport: YM2612Transport,
  * }} YM2612SynthOptions
  */
@@ -215,6 +217,9 @@ export class YM2612DirectTransport {
     }
   }
 
+  /** @param {number} port
+   * @param {number} register
+   * @param {number} value */
   write(port, register, value) {
     if (port === 1 && register === 0xb6) this.dacPanRegister = value;
     this.dacPlayer?.observeWrite(port, register, value);
@@ -232,7 +237,7 @@ export class YM2612DirectTransport {
     this.dacPlayer.command(command, this.frame);
   }
 
-  /** Render through this transport to advance PCM playback and the Node timeline together. */
+  /** Render through this transport to advance PCM playback and the Node timeline together. @param {number} frames */
   generateStereo(frames) {
     if (!Number.isSafeInteger(frames) || frames < 0) throw new RangeError('frames must be a nonnegative integer');
     const left = new Float32Array(frames), right = new Float32Array(frames);
@@ -252,6 +257,7 @@ export class YM2612DirectTransport {
     return {left, right};
   }
 
+  /** @param {number} offset */
   read(offset) {
     if (typeof this.chip.read !== "function") {
       throw new Error("YM2612DirectTransport chip does not support read(offset)");
@@ -276,7 +282,7 @@ export class YM2612DirectTransport {
 
 export class YM2612WorkletTransport {
   /**
-   * @param {AudioWorkletNode} node
+   * @param {AudioWorkletNode | MessagePort | import('./soundchip_worklet.js').WorkletSoundChip} node
    */
   constructor(node) {
     this.endpoint = node?.execution === 'worklet' ? node : null;
@@ -343,6 +349,9 @@ export class YM2612WorkletTransport {
     });
   }
 
+  /** @param {number} port
+   * @param {number} register
+   * @param {number} value */
   write(port, register, value) {
     this.node.port.postMessage({
       type: "write",
@@ -393,7 +402,9 @@ export class YM2612Synth {
       throw new Error("YM2612Synth requires a transport with a write(...) function");
     }
 
+    if (!Number.isFinite(options.clock ?? 7670454) || (options.clock ?? 7670454) <= 0) throw new RangeError('Clock must be positive finite Hz');
     this.transport = transport;
+    this.clock = options.clock ?? 7670454;
     this.hooks = {
       onWrite: undefined,
       onRead: undefined,
@@ -816,19 +827,20 @@ export class YM2612Synth {
     this._write(0, 0x2a, validValue);
   }
 
-  /**
-   * Write BLOCK / F-NUM without triggering KEY ON.
-   *
-   * This is the explicit YM2612-shaped frequency helper:
-   * - setFrequency(CH1, 4, 553)
-   * - keyOn(CH1)
-   *
-   * @param {number} channel
-   * @param {number} block
-   * @param {number} fnum
-   * @returns {void}
-   */
-  setFrequency(channel, block, fnum) {
+  /** Set frequency in Hz without KEY ON. @overload @param {number} channel @param {number} hz @returns {void} */
+  /** @overload @param {number} channel @param {number} block @param {number} fnum @returns {void} */
+  /** Frequency in Hz with two arguments; legacy three-argument form is raw BLOCK/F-NUM.
+   * @param {number} channel @param {number} hzOrBlock @param {number} [fnum] */
+  setFrequency(channel, hzOrBlock, fnum) {
+    if (arguments.length > 2) return this.setBlockFnum(channel, hzOrBlock, fnum);
+    const pitch = opnPitchFromHz(hzOrBlock, this.clock, 144);
+    this.setBlockFnum(channel, pitch.block, pitch.fnum);
+  }
+  /** Configure a note name or integer MIDI 0..127 without triggering.
+   * @param {number} channel @param {string|number} note */
+  setNote(channel, note) { this.setFrequency(channel, noteToHz(note)); }
+  /** Raw hardware pitch, without triggering. @param {number} channel @param {number} block @param {number} fnum */
+  setBlockFnum(channel, block, fnum) {
     assertChannel(channel);
     const validBlock = validateRange("block", block, 0, 7);
     const validFnum = validateRange("fnum", fnum, 0, 0x7ff);
@@ -890,16 +902,18 @@ export class YM2612Synth {
     this._write(0, 0x28, operatorMask | KEY_CHANNEL_CODES[channel]);
   }
 
-  /**
-   * Write BLOCK/FNUM and trigger Key On for all operators on one channel.
-   *
-   * @param {number} channel
-   * @param {number} block
-   * @param {number} fnum
-   * @returns {void}
-   */
-  noteOn(channel, block, fnum) {
-    this.setFrequency(channel, block, fnum);
+  /** Note name or integer MIDI plus KEY ON. @overload @param {number} channel @param {string|number} note @returns {void} */
+  /** @overload @param {number} channel @param {number} block @param {number} fnum @returns {void} */
+  /** Set a musical note and trigger. Legacy three-argument form uses raw pitch.
+   * @param {number} channel @param {string|number} noteOrBlock @param {number} [fnum] */
+  noteOn(channel, noteOrBlock, fnum) {
+    if (arguments.length > 2) return this.noteOnRaw(channel, noteOrBlock, fnum);
+    this.setNote(channel, noteOrBlock);
+    this.keyOn(channel);
+  }
+  /** Raw pitch plus trigger. @param {number} channel @param {number} block @param {number} fnum */
+  noteOnRaw(channel, block, fnum) {
+    this.setBlockFnum(channel, block, fnum);
     this.keyOn(channel);
   }
 
@@ -1133,6 +1147,7 @@ export class YM2612Synth {
     });
   }
 
+  /** @param {number} offset */
   _notifyRead(offset, value) {
     if (typeof this.hooks.onRead === "function") {
       this.hooks.onRead({ offset, value });
@@ -1194,6 +1209,7 @@ function validateOperatorParams(params) {
   return result;
 }
 
+/** @param {number} channel */
 function splitChannel(channel) {
   if (channel < 3) {
     return { port: 0, channelOffset: channel };
@@ -1219,18 +1235,21 @@ function buildKeyOperatorMask(operators) {
   return mask;
 }
 
+/** @param {number} channel */
 function assertChannel(channel) {
   if (!Number.isInteger(channel) || channel < 0 || channel >= CHANNEL_COUNT) {
     throw new Error(`channel must be an integer in range 0..5, got ${channel}`);
   }
 }
 
+/** @param {number} operator */
 function assertOperator(operator) {
   if (!Number.isInteger(operator) || operator < 0 || operator >= OPERATOR_COUNT) {
     throw new Error(`operator must be an integer in range 0..3, got ${operator}`);
   }
 }
 
+/** @param {number} operator */
 function getPresetOperatorParams(
   preset,
   operator

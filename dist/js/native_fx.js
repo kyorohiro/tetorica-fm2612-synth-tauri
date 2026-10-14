@@ -4,6 +4,26 @@
  * Slots are private to a controller; activate one controller at a time per rack.
  */
 export const FX_TYPES = {gain:2, eq:3, gate:4, compressor:5, reverb:6, filter:7, delay:8, distortion:9, bitcrusher:10, wobble:11, flanger:12, slicer:13, chorus:14};
+/** Keep named liveFx declarations in sync with successful script evaluations. */
+export function createLiveFxLifecycle() {
+ let active=new Map();const prepared=new Map();
+ return {
+  track(api,definitions){return new Proxy(api,{get(target,key){
+   if(key!=='liveFx')return Reflect.get(target,key);
+   return (name,options)=>{const result=target.liveFx(name,options);definitions.set(name,{remove:()=>target.removeLiveFx(name),restore:()=>target.liveFx(name,options)});return result;};
+  }});},
+  async prepare(name,definitions,create){
+   const before=new Map(definitions),value=await create();
+   const retained=prepared.get(name)??new Map();
+   for(const [key,remove] of definitions)if(before.get(key)!==remove)retained.set(key,remove);
+   prepared.set(name,retained);
+   for(const [key,definition] of retained)if(!definitions.has(key)){if(!active.has(key))definition.restore();definitions.set(key,definition);}
+   return value;
+  },
+  commit(definitions){for(const [name,definition] of active)if(!definitions.has(name))definition.remove();active=definitions;},
+  clear(){for(const definition of active.values())definition.remove();active=new Map();prepared.clear();},
+ };
+}
 // [default, minimum, maximum]. Times use seconds; modulation periods use beats.
 export const FX_PARAMS = {
  gain:{gain:[1,0,10]}, eq:{bass:[0,-12,12],mid:[0,-12,12],treble:[0,-12,12]},
@@ -19,8 +39,14 @@ export const FX_PARAMS = {
  slicer:{phase:[.25,.03125,16],duty:[.5,.05,.95],floor:[0,0,1],mix:[1,0,1]},
  chorus:{time:[.02,.01,.04],depth:[.005,0,.01],rate:[1,.03125,16],mix:[.5,0,1]},
 };
+/**
+ * Create native effect units and parameter controls without AudioNode dependencies.
+ * @param {(message:Record<string,unknown>)=>void} send Ordered transport sender.
+ * @param {{getBeatSeconds?: () => number}} [options={}] Current beat duration in seconds for modulation.
+ * @returns Effect factories, chain management and controller lifecycle methods.
+ */
 export function createNativeFXController(send, {getBeatSeconds=()=>.5}={}) {
- const units=new Set(); const slots={}; let chain=[];
+ const units=new Set(); const slots={}; let chain=[],chainSignature=null;
  const contains=(root,u)=>root===u || (root.children??[]).some(c=>contains(c,u));
  const snapshot=u=>({type:u.type,slot:u.slot,values:{...u.values}});
  const parameter=(u,key,value,seconds=0)=>{
@@ -43,6 +69,7 @@ export function createNativeFXController(send, {getBeatSeconds=()=>.5}={}) {
   return structuredClone(value);
  };
  const api={
+  /** @param {string} name @param {{process: (input: Float32Array[], output: Float32Array[], state: Record<string, unknown>, context: Record<string, unknown>) => void, context?: Record<string, unknown>, resetState?: boolean}} [options] */
   liveFx(name,{process,context={},resetState=false}={}){
    if(typeof name!=='string'||!name)throw new Error('liveFx requires a name');
    if(typeof process!=='function'||process.constructor.name!=='Function')throw new Error('process must be synchronous');
@@ -58,10 +85,12 @@ export function createNativeFXController(send, {getBeatSeconds=()=>.5}={}) {
    const seen=new Set(); const children=effects.map(u=>descriptor(u,seen));
    if(seen.size+1>32) throw new Error('Native FX maximum is 32 graph nodes');
    for(const u of seen) if(u.type==='parallel'&&!u.children.length) throw new Error('Empty parallel FX');
-   send({op:'chain',children,units:[...units].map(snapshot),beatSeconds:getBeatSeconds()}); chain=effects.slice();return effects;
+   const beatSeconds=getBeatSeconds(),signature=JSON.stringify({children,beatSeconds});
+   if(signature!==chainSignature){send({op:'chain',children,units:[...units].map(snapshot),beatSeconds});chainSignature=signature;}
+   chain=effects.slice();return effects;
   },
   clear({dispose=false}={}){ const previous=chain; api.setChain([]);send({op:'clear'});if(dispose) api.dispose();return previous; },
-  dispose(){send({op:'reset'});units.clear();for(const k of Object.keys(slots)) delete slots[k];chain=[];},
+  dispose(){send({op:'reset'});units.clear();for(const k of Object.keys(slots)) delete slots[k];chain=[];chainSignature=null;},
   getChain(){return chain.slice();},
   syncTempo(){send({op:'tempo',beatSeconds:getBeatSeconds()});},
  };

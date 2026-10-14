@@ -11,17 +11,20 @@ import { YM2608_CLOCK } from "./ym2608.js";
 import {readSamplePCM, encodeAdpcmB} from './adpcm_b_sample.js';
 
 /** Direct transport for YM2608 register operations. */
+/** @extends {OPNDirectTransport<import('./ym2608.js').Ym2608>} */
 export class YM2608DirectTransport extends OPNDirectTransport {
+  /** @param {import('./ym2608.js').Ym2608} chip */
   constructor(chip) {
     super(chip, { chipName: "YM2608", portCount: 2 });
   }
-  /** Transfer caller-provided rhythm ROM to the core. */
+  /** Transfer caller-provided rhythm ROM to the core. @param {Uint8Array} bytes */
   loadRhythmRom(bytes) { return this.chip.loadAdpcmARom(bytes); }
-  /** Transfer already encoded ADPCM-B bytes to external sample memory. */
+  /** Transfer already encoded ADPCM-B bytes to external sample memory. @param {Uint8Array} bytes @param {number} offset */
   loadAdpcmMemory(bytes, offset) { return this.chip.loadAdpcmBMemory(bytes, offset); }
 }
 
 export class YM2608WorkletTransport extends OPNWorkletTransport {
+  /** @param {AudioWorkletNode|MessagePort|import('./soundchip_worklet.js').WorkletSoundChip} endpoint */
   constructor(endpoint) {super(endpoint, {chipName: 'YM2608', portCount: 2});}
 }
 
@@ -42,14 +45,14 @@ const rhythmVoice = voice => {
 
 /** Register control for the fixed rhythm ROM; does not decode WAV or allocate PCM voices. */
 export class YM2608RhythmSynth {
-  /** @param {{write: function(number, number): void, loadRom: function(Uint8Array): void}} transport */
+  /** @param {{write: (register: number, value: number) => void, loadRom: (bytes: Uint8Array) => void}} transport */
   constructor(transport) {
     this.transport = transport;
     this.resetState();
   }
   /** Clear the register shadow after a whole-chip reset, without bus writes. */
   resetState() { this.levels = new Uint8Array(6); }
-  /** Track raw port-0 writes made through the parent Synth. */
+   /** Track raw port-0 writes made through the parent Synth. @param {number} register  @param {number} value */
   observeWrite(register, value) {
     if (register >= 0x18 && register <= 0x1d) this.levels[register - 0x18] = value;
   }
@@ -60,7 +63,7 @@ export class YM2608RhythmSynth {
     if (!(bytes instanceof Uint8Array) || bytes.length !== 8192) throw new RangeError("Rhythm ROM must be an 8192-byte Uint8Array");
     return this.transport.loadRom(bytes);
   }
-  /** Set global hardware level 0..63; larger values are louder. */
+  /** Set global hardware level 0..63; larger values are louder. @param {number} volume */
   setVolume(volume) { this.transport.write(0x11, rhythmInteger("volume", volume, 63)); }
   /** Set one voice's hardware level 0..31 and/or stereo gates; omitted settings are preserved.
    * @param {number|string} voice 0..5 or a key of YM2608_RHYTHM_VOICES.
@@ -105,7 +108,7 @@ const adpcmInteger = (name, value, max) => {
  * Browser / Worker / Node.js. loadSample decodes PCM WAV without an audio device.
  */
 export class YM2608AdpcmSynth {
-  /** @param {{write: function(number, number): void, loadMemory: function(Uint8Array, number): void}} transport
+  /** @param {{write: (register: number, value: number) => void, loadMemory: (bytes: Uint8Array, address: number) => void}} transport
    * @param {number} clock Master clock in Hz; rate conversion assumes standard FM prescaling.
    */
   constructor(transport, clock = YM2608_CLOCK) {
@@ -119,10 +122,11 @@ export class YM2608AdpcmSynth {
     this.registers = new Uint8Array(16);
     this.registers[12] = this.registers[13] = 255;
   }
-  /** Track raw port-1 writes through the parent Synth. */
+   /** Track raw port-1 writes through the parent Synth. @param {number} register  @param {number} value */
   observeWrite(register, value) {
     if (register >= 0 && register < 16) this.registers[register] = value;
   }
+   /** @param {number} register  @param {number} value */
   _write(register, value) {
     this.transport.write(register, value);
     this.observeWrite(register, value);
@@ -187,6 +191,7 @@ export class YM2608AdpcmSynth {
   }
   /** Set decoded PCM samples/second, not byte rate. Returns the quantized actual rate.
    * A byte contains two samples; changing this rate changes both speed and pitch.
+   * @param {number} rate
    */
   setPlaybackRate(rate) {
     if (!Number.isFinite(rate) || rate <= 0) throw new RangeError("Invalid ADPCM-B playback rate");
@@ -194,9 +199,9 @@ export class YM2608AdpcmSynth {
     this.setDeltaN(delta);
     return delta * this.clock / (144 * 65536);
   }
-  /** Linear level 0..255 (0=silence). */
+  /** Linear level 0..255 (0=silence). @param {number} volume */
   setVolume(volume) { this._write(11, adpcmInteger("volume", volume, 255)); }
-  /** Stereo gates; preserves memory-mode bits from raw register writes. */
+   /** Stereo gates; preserves memory-mode bits from raw register writes.  @param {boolean} right  @param {boolean} left */
   setPan(left, right) {
     if (typeof left !== "boolean" || typeof right !== "boolean") throw new TypeError("ADPCM-B pan expects booleans");
     this._write(1, (this.registers[1] & 0x3f) | (left ? 128 : 0) | (right ? 64 : 0));
@@ -220,12 +225,13 @@ export class YM2608AdpcmSynth {
 
 /** Six-channel FM (including CH3 special), three-channel SSG, fixed-ROM rhythm and ADPCM-B playback. */
 export class YM2608Synth extends OPNFMSynth {
-  /** @param {{transport: OPNDirectTransport, clock?: number}} options
+  /** @param {{transport: import('./opn_fm_synth.js').OPNTransport, clock?: number}} options
    * clock is the master clock in Hz. SSG frequency helpers assume standard prescaling.
    */
   constructor({ transport, clock = YM2608_CLOCK } = {}) {
     super({
       transport,
+      clock,
       chipName: "YM2608",
       channelCount: 6,
       portCount: 2,
@@ -263,6 +269,9 @@ export class YM2608Synth extends OPNFMSynth {
     this.write(0, 0x29, 0x9f);
   }
 
+  /** @param {number} port
+   * @param {number} value
+   * @param {number} register */
   _write(port, register, value) {
     super._write(port, register, value);
     if (port === 0) {
@@ -282,7 +291,7 @@ export class YM2608RuntimeSynth extends OPNRuntimeSynth {
       portCount: 2,
       processorName: "ym2608-processor",
       workletUrl: "./ym2608-worklet.js",
-      wasmUrl: "./generated/ym2608_wasm.wasm",
+      wasmUrl: "../generated/ym2608_wasm.wasm",
       FMSynth: YM2608Synth,
       rhythmRomUrl: new URL('./tetorica_ym2608_adpcm_rom.bin', import.meta.url),
     });
