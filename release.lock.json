@@ -1,5 +1,5 @@
 {
-  "archive": "hello_ymfm_wasm_native-audio-dev_itch_synth.zip",
+  "archive": "hello_ymfm_wasm_menu-pin-dev_itch_synth.zip",
   "files": {
     "LICENSE": "2d2e9213c170a9866c616fa85b6da993a6724e10befc61f468ed9bfb84c4691c",
     "THIRD_PARTY_LICENSES.txt": "53a88d541f210806ea5e6a85cc59b92e243fb519cb6ab629f8972ac1326092a1",
@@ -19,7 +19,7 @@
     "generated/ym2608_wasm.wasm": "d9cc3a89b8df4b8b318ec23b3c0ba24189f4adc0e10a7050c916fcc1be446946",
     "generated/ym2612_wasm.js": "92dae7b14ae953f9c7c94d4a8ac691319c43208effb7947dd3a5013cd9325019",
     "generated/ym2612_wasm.wasm": "7c19b1c04e198b7efe0c29dab906dc9e8ac36d66523ffcc027f61b17833948f6",
-    "index.html": "e48c7c4d5f8fa63c6af96019ab7f1039c5beb5413fd552167dcaf1996d1b38b3",
+    "index.html": "c589a51cdffec5d9fbe64e07b2e5474360d3bdf79674d2919e175ed55d246fbd",
     "js/adpcm_b_sample.js": "6cd2346c09713427384f14c152c03b2334928f10e618184a521790a7e9815f93",
     "js/bitcrusher-worklet.js": "782a8c0f015770792f7226f3d6a874c23e067ecf8665337244baa5872b3d52d9",
     "js/custom_fx.js": "31ff82fc7ef82e7570194468481e77ac33e20eed233e5e35a5813202a156a05f",
@@ -107,11 +107,12 @@
     "playground/playground_vgm_presets.js": "e4c531a355c1116bbba072b09b410f810f36bf66867c7d4ba90d11f7799a96a1",
     "playground/rf5c164_vgm_export.js": "f9510b4bd8d83b535ddb93639b866d42cbbd03a1d97640872f793bddcc7b5727",
     "playground/ym2203_high.js": "277b2456042c80f66d9f7761bcddf9ba08c30b2183f41ccd6f3a6034d7b9387e",
-    "synth.js": "966123f0dfdd1188ea1ba541012b42433631f48647d2347dbb64d08d7f6815e1",
+    "synth.js": "852494ab904a866d84817166ee7c0962044f482593a6e359de9529dde4332064",
     "synth_controls.js": "468ca52efcb1b446249dc1c60eec9569b4b4870477a30c45870f0c469d880b5f",
     "synth_envelope.js": "48ee396c93cc1d0a992d0f956cbbc9e82788147f6e214faa175b78128151b4be",
     "synth_input.js": "d6067835e3e608564b1c65b1edb23bf748f61a6ff7d65f91b6c681f9544557de",
     "synth_keyboard.js": "a7cb6fe44f3327747718c951faf726795d1250fa5d0e3ee5e7b11d40ae623b24",
+    "synth_menu.js": "7f9ee7b7cdf3df52395ddf377af7b9f885751d8661260301cdb271289b7a4c5f",
     "synth_modulation.js": "ef0971094fd2be036b8023eb7a155649af088802392a880833bdf5b9648ed6fb",
     "synth_output_visualizer.js": "4d551cda02b4bf2b4d28573a332ef353a1e48e5773af39a1062dfd4206607e66",
     "synth_pitch_bend.js": "7e10712646b165ae30b3a0e58c5d7afcfaa921582885f7d7c128cccd5ab5aa2b",
@@ -122,6 +123,6 @@
     "vgm_analyzer/opm_tfi.js": "40270e2654ee43db0897a89bfbefb146cec8413313ab96acb5a24b798c91798c",
     "vgm_analyzer/stored_zip.js": "dc4e7a8eda73cdc160b5a9493cadfd40d087158d4af9634bcc7cdd6811d2b968"
   },
-  "sha256": "e684973372d15fa8a95f0427bd84e26ffdbbb0a43bb5e60db0a3896dfe1d3c15",
-  "version": "sha256-e684973372d1"
+  "sha256": "7e33ab335f7d514cb93f60a9bc138ea91224f964209e73511bd72982a415d463",
+  "version": "sha256-7e33ab335f7d"
 }

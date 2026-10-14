@@ -17,9 +17,13 @@ WebView の標準ファイル選択・ドロップを使い、音色を取り込
 TFI / VGI と録音 JSON の書き出しはネイティブの保存ダイアログを開きます。
 `Reset Offline Cache` は確認ダイアログの後、アプリの画面を再読み込みします。
 
+画面左上のハンバーガーメニューに **Import**、**Export**、**Audio output** をまとめています。
+隣の Pin ボタンで最前面表示を切り替えます。選択中はボタンが点灯し、もう一度押すと解除します。
+最前面表示はアプリを起動している間の設定です。ブラウザ版には Pin ボタンを表示しません。
+
 ## 音声出力
 
-Vol の下の **Audio output** を開き、**Web Audio** または **Native (Rust)**
+画面左上のハンバーガーメニューから **Audio output** を開き、**Web Audio** または **Native (Rust)**
 を選べます。Native はシステムの既定デバイスで開始します。別の機器を使う場合は
 デバイスを選び、**Apply device** を押してください。
 
@@ -92,7 +96,7 @@ GitHub Actions の **Build Desktop** は macOS ARM64 / x86_64、Windows x86_64�
 ## 構成
 
 - `dist/`：上流 ZIP の内容。Tauri 用に書き換えません。
-- `desktop/desktop-interface.js`：保存・再読み込みの接続。ローカルの main 画面だけに適用。
+- `desktop/desktop-interface.js`：保存・再読み込み・最前面表示の接続。ローカルの main 画面だけに適用。
 - `desktop/audio-interface.js` / `audio-worklet.js`：出力設定と最終 PCM の捕捉。
 - `src-tauri/src/audio.rs`：Rust 出力デバイス・バイナリ IPC・バッファ管理。
 - `src-tauri/`：ウィンドウ・標準メニュー・保存ダイアログ・ビルド設定。

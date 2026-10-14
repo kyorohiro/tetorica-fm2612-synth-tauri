@@ -5,7 +5,8 @@ const source = fs.readFileSync(path.join(__dirname, '../desktop/audio-interface.
 const flush = async () => { for (let index = 0; index < 3; index++) await new Promise(resolve => setImmediate(resolve)); };
 function deferred() { let resolve, reject; const promise = new Promise((ok, fail) => { resolve = ok; reject = fail; }); return {promise, resolve, reject}; }
 
-function boot({url = 'tauri://localhost/index.html', subframe = false, initiallyReady = true, override = {}} = {}) {
+function boot({url = 'tauri://localhost/index.html', subframe = false, initiallyReady = true,
+  menuHostPresent = true, browserHintPresent = true, override = {}} = {}) {
   const nodes = new Map(), calls = [], taps = [], modules = [], switches = [], timers = new Map(), pendingPolls = [];
   let nextTimer = 1, nextSession = 0, stopCount = 0, clockTime = 0;
   class Element {
@@ -49,14 +50,18 @@ function boot({url = 'tauri://localhost/index.html', subframe = false, initially
     }
     return null;
   }};
-  const row = new Element('row'), document = new Element('document'); document.readyState = 'complete';
+  const host = new Element('section'), browserHint = new Element('p'), row = new Element('row');
+  const document = new Element('document'); document.readyState = 'complete';
   document.createElement = tag => new Element(tag); document.querySelector = () => row;
+  document.getElementById = id => id === 'synthMenuAudio' ? (menuHostPresent ? host : null) :
+    id === 'synthBrowserAudioHint' ? (browserHintPresent ? browserHint : null) : nodes.get(id) ?? null;
   vm.runInNewContext(source, {window, document, location: new URL(url), URL, Option, AudioWorkletNode, ArrayBuffer, Uint8Array, WeakSet,
     performance: {now: () => clockTime},
     setTimeout(fn) {const id = nextTimer++; timers.set(id, fn); return id;}, clearTimeout(id) {timers.delete(id);}});
   const mode = () => nodes.get('desktop-audio-mode');
   const choose = async value => {mode().value = value; mode().dispatch('change'); await flush();};
-  return {nodes, calls, taps, modules, switches, timers, pendingPolls, window, row, bridge, context, edges, analyser, recorder, destination,
+  return {nodes, calls, taps, modules, switches, timers, pendingPolls, window, host, browserHint, row, bridge, context, edges, analyser, recorder, destination,
+    mountHost() {menuHostPresent = true; window.dispatch('tetorica-synth-ready');},
     advance(milliseconds) {clockTime += milliseconds;},
     choose, stopCount: () => stopCount,
     poll: async (result = {credits: 0, error: null, queuedFrames: 1024, underruns: 0}, session) => {
@@ -71,9 +76,37 @@ test('desktop-only controls wait for the Synth bridge and do not mount in remote
     assert.equal(boot(options).nodes.size, 0);
   }
   const ui = boot({initiallyReady: false}); assert.equal(ui.nodes.size, 0);
+  assert.equal(ui.browserHint.hidden, false);
   ui.window.tetoricaSynthAudio = ui.bridge; ui.window.dispatch('tetorica-synth-ready');
   assert.ok(ui.nodes.get('desktop-audio-mode'));
-  const original = ui.row.afterElement; ui.window.dispatch('tetorica-synth-ready'); assert.equal(ui.row.afterElement, original);
+  const original = ui.host.children[0]; ui.window.dispatch('tetorica-synth-ready');
+  assert.equal(ui.host.children[0], original); assert.equal(ui.host.children.length, 1);
+  assert.equal(ui.row.afterElement, undefined); assert.equal(ui.browserHint.hidden, true);
+});
+
+test('audio output stays inside the menu and a missing menu host leaves the browser fallback visible', () => {
+  const ui = boot({menuHostPresent: false});
+  assert.equal(ui.nodes.size, 0); assert.equal(ui.browserHint.hidden, false);
+  assert.equal(ui.row.afterElement, undefined);
+  ui.mountHost();
+  assert.equal(ui.host.children.length, 1);
+  assert.equal(ui.host.children[0], ui.nodes.get('desktop-audio-output'));
+  assert.equal(ui.browserHint.hidden, true);
+  const withoutHint = boot({browserHintPresent: false});
+  assert.equal(withoutHint.host.children.length, 1);
+});
+
+test('pointer actions keep the playing keyboard focus and selects blur after changes', async () => {
+  const ui = boot();
+  const panel = ui.nodes.get('desktop-audio-output'), controls = panel.children[1];
+  for (const control of [panel.children[0], controls.children[2], controls.children[3]]) {
+    const event = {}; control.dispatch('pointerdown', event); assert.equal(event.prevented, true);
+  }
+  await ui.choose('native');
+  assert.equal(ui.nodes.get('desktop-audio-mode').blurred, true);
+  ui.nodes.get('desktop-audio-device').dispatch('change');
+  assert.equal(ui.nodes.get('desktop-audio-device').blurred, true);
+  assert.equal(ui.host.children[0], panel);
 });
 
 test('switching to native reroutes only the speaker edge and switching back cleans up', async () => {

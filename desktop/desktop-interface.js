@@ -2,7 +2,7 @@
   'use strict';
   const local = (location.protocol === 'tauri:' && location.hostname === 'localhost') ||
     (['http:', 'https:'].includes(location.protocol) && location.hostname === 'tauri.localhost');
-  if (window.top !== window || !local) return;
+  if (window.top !== window || !local || typeof window.__TAURI_INTERNALS__?.invoke !== 'function') return;
   const invoke = (command, args = {}) => window.__TAURI_INTERNALS__.invoke(command, args);
   const status = text => {const element = document.getElementById('status'); if (element) element.textContent = text;};
   const blobs = new Map();
@@ -33,9 +33,44 @@
       dialog.append(message, cancel, confirm); document.body.append(dialog); dialog.showModal(); cancel.focus();
     });
   }
+  const mountedReloadButtons = new WeakSet(), mountedPinButtons = new WeakSet();
+  function mountPin() {
+    const button = document.getElementById('synthPinButton');
+    if (!button || mountedPinButtons.has(button)) return;
+    mountedPinButtons.add(button);
+    let pinned = false, busy = true;
+    const render = () => {
+      button.disabled = busy;
+      button.setAttribute('aria-pressed', String(pinned));
+      button.classList.toggle('is-selected', pinned);
+      button.title = pinned ? 'Unpin window' : 'Pin window on top';
+      button.setAttribute('aria-label', button.title);
+    };
+    const readState = value => {
+      if (typeof value !== 'boolean') throw new TypeError('Invalid native pin state');
+      pinned = value;
+    };
+    // Keep the keyboard's performance target when clicking the toolbar.
+    button.addEventListener('pointerdown', event => event.preventDefault());
+    button.addEventListener('click', async () => {
+      if (busy) return;
+      busy = true; render();
+      try {readState(await invoke('set_window_pin', {pinned: !pinned}));}
+      catch (error) {status(`Could not pin window: ${String(error)}`);}
+      finally {busy = false; render();}
+    });
+    render();
+    void invoke('window_pin_state')
+      .then(value => {readState(value); button.hidden = false;})
+      .catch(error => status(`Could not read window pin state: ${String(error)}`))
+      .finally(() => {busy = false; render();});
+  }
   function mount() {
+    mountPin();
     const button = document.querySelector('[data-reset-offline-cache]');
-    button?.addEventListener('click', async event => {
+    if (!button || mountedReloadButtons.has(button)) return;
+    mountedReloadButtons.add(button);
+    button.addEventListener('click', async event => {
       event.preventDefault(); event.stopImmediatePropagation();
       if (button.disabled) return;
       button.disabled = true;
@@ -44,6 +79,7 @@
       finally {button.disabled = false;}
     }, {capture: true});
   }
+  window.addEventListener('tetorica-synth-ready', mount);
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', mount, {once: true});
   else mount();
 })();

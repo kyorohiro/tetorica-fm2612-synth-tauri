@@ -11,8 +11,8 @@
 
   function mount() {
     const bridge = window.tetoricaSynthAudio;
-    const row = document.querySelector('.volume-row');
-    if (mounted || !bridge || !row) return;
+    const host = document.getElementById('synthMenuAudio');
+    if (mounted || !bridge || !host) return;
     mounted = true;
     const panel = document.createElement('details');
     panel.id = 'desktop-audio-output';
@@ -47,7 +47,9 @@
     hint.style.cssText = 'margin:4px 0;color:#aebcad';
     controls.append(mode, device, refresh, apply);
     panel.append(summary, controls, status, hint);
-    row.after(panel);
+    host.append(panel);
+    const browserHint = document.getElementById('synthBrowserAudioHint');
+    if (browserHint) browserHint.hidden = true;
     // Button pointer interaction must not take the playing keyboard's focus.
     for (const button of [refresh, apply, summary]) button.addEventListener('pointerdown', event => event.preventDefault());
     for (const select of [mode, device]) select.addEventListener('change', () => select.blur());

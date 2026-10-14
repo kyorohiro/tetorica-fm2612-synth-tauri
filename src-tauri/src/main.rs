@@ -71,6 +71,49 @@ fn reload_window(window: tauri::WebviewWindow) -> Result<(), String> {
     window.reload().map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn window_pin_state(window: tauri::WebviewWindow) -> Result<bool, String> {
+    allowed(&window)?;
+    window.is_always_on_top().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn set_window_pin(window: tauri::WebviewWindow, pinned: bool) -> Result<bool, String> {
+    allowed(&window)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        window
+            .set_always_on_top(pinned)
+            .map_err(|error| error.to_string())?;
+        // On macOS, Tao queues NSWindow.setLevel asynchronously. An immediate
+        // getter can still return the previous state. Wait off the main thread
+        // so native window operations can finish before confirming the toggle.
+        confirm_window_pin(
+            pinned,
+            || window.is_always_on_top().map_err(|error| error.to_string()),
+            || std::thread::sleep(std::time::Duration::from_millis(10)),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn confirm_window_pin(
+    pinned: bool,
+    mut read_state: impl FnMut() -> Result<bool, String>,
+    mut wait: impl FnMut(),
+) -> Result<bool, String> {
+    for attempt in 0..100 {
+        let actual = read_state()?;
+        if actual == pinned {
+            return Ok(actual);
+        }
+        if attempt < 99 {
+            wait();
+        }
+    }
+    Err("Window pin state did not change".into())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -82,6 +125,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             save_export,
             reload_window,
+            window_pin_state,
+            set_window_pin,
             audio::audio_devices,
             audio::audio_start,
             audio::audio_write,
@@ -150,5 +195,51 @@ mod tests {
         assert_eq!(export_name("C:\\voice.vgi"), "voice.vgi");
         assert_eq!(export_name("\n"), "export.bin");
         assert_eq!(export_name(".."), "export.bin");
+    }
+    #[test]
+    fn pin_confirmation_waits_for_queued_native_change() {
+        for pinned in [false, true] {
+            let waits = std::cell::Cell::new(0);
+            let reads = std::cell::Cell::new(0);
+            let actual = confirm_window_pin(
+                pinned,
+                || {
+                    reads.set(reads.get() + 1);
+                    Ok(if waits.get() >= 2 { pinned } else { !pinned })
+                },
+                || waits.set(waits.get() + 1),
+            )
+            .unwrap();
+            assert_eq!(actual, pinned);
+            assert_eq!(reads.get(), 3);
+            assert_eq!(waits.get(), 2);
+        }
+    }
+    #[test]
+    fn pin_confirmation_is_bounded_when_native_state_does_not_change() {
+        let waits = std::cell::Cell::new(0);
+        let reads = std::cell::Cell::new(0);
+        let error = confirm_window_pin(
+            true,
+            || {
+                reads.set(reads.get() + 1);
+                Ok(false)
+            },
+            || waits.set(waits.get() + 1),
+        )
+        .unwrap_err();
+        assert_eq!(error, "Window pin state did not change");
+        assert_eq!(reads.get(), 100);
+        assert_eq!(waits.get(), 99);
+    }
+    #[test]
+    fn pin_confirmation_stops_on_native_error() {
+        let error = confirm_window_pin(
+            true,
+            || Err("window closed".into()),
+            || panic!("A failed getter must not continue polling"),
+        )
+        .unwrap_err();
+        assert_eq!(error, "window closed");
     }
 }
