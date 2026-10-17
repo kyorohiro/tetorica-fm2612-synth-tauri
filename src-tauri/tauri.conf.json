@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Tetorica FM2612 Synth",
-  "version": "0.71.1",
+  "version": "0.80.5",
   "identifier": "net.tetorica.fm2612-synth",
   "build": {
     "frontendDist": "../dist",
