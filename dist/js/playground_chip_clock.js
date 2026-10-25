@@ -1,7 +1,9 @@
 /** Chip clocks are Hz, independent of output frames, VGM samples and BPM. */
-export const CHIP_CLOCKS = Object.freeze({ym2612:7670454, ym2203:4000000, ym2610:8000000,
+export const CHIP_CLOCKS = Object.freeze({ym2612:7670454, ym2203:4000000, ym2610:8000000, ym2610b:8000000,
   ym2608:8000000, ym2151:3579545, segapsg:3579545, gameboy:4194304,
-  nes:1789773, rf5c164:12500000, pwm:23011361});
+  nes:1789773, snes:1024000, x68000:4000000, huc6280:3579545, okim6258:8000000,
+  ay8910:1789773, msx:1789773, 'msx-audio':1789773, ym2413:3579545, ym3526:3579545, ym3812:3579545, y8950:3579545, ymf262:14318180,
+  rf5c164:12500000, pwm:23011361});
 
 /** @param {number} hz */
 export function validateChipClock(hz) {
@@ -26,7 +28,7 @@ export class ChipClockResampler {
       const count = Math.floor(this.remainder); this.remainder -= count;
       this.counts[i] = count; frames += count;
     }
-    const pcm = frames ? chip.generateStereo(frames) : null;
+    const pcm = frames ? (chip.generateStereoView ?? chip.generateStereo).call(chip,frames) : null;
     let offset = 0;
     for (let i = 0; i < left.length; i++) {
       const count = this.counts[i];
@@ -44,7 +46,7 @@ export class ChipClockResampler {
  * @template T
  * @param {T} client @param {MessagePort} port @param {number} initialClock
  * @param {{primary?:boolean, batch?:boolean, onApplied?:(hz:number)=>void}} [options]
- * @returns {T & {readonly clock:number, setClock(hz:number):Promise<void>}}
+ * @returns {T & {readonly clock:number, setClock(hz:number):Promise<void>, _requestControl(method:string,args?:any[]):Promise<any>}}
  */
 export function attachChipClock(client, port, initialClock, {primary = false, batch = false, onApplied = () => {}} = {}) {
   let clock = initialClock, sequence = 0, disposed = false;
@@ -56,7 +58,7 @@ export function attachChipClock(client, port, initialClock, {primary = false, ba
     if (!entry) { if (!port.addEventListener) previous?.call(port, event); return; }
     pending.delete(data.id);
     if (data.error) entry.reject(new Error(data.error));
-    else { try { clock = entry.hz; onApplied(clock); entry.resolve(); } catch (error) { entry.reject(error); } }
+    else { try { if(entry.hz!==undefined){clock = entry.hz; onApplied(clock);}entry.resolve(data.value); } catch (error) { entry.reject(error); } }
   };
   if (port.addEventListener) port.addEventListener('message', listener);
   else port.onmessage = listener;
@@ -73,9 +75,17 @@ export function attachChipClock(client, port, initialClock, {primary = false, ba
       catch (error) { pending.delete(id); throw error; }
     } catch (error) { reject(error); }
   });
+  Object.defineProperty(client,'_requestControl',{value:(method,args=[])=>new Promise((resolve,reject)=>{
+    try{
+      if(disposed)throw new Error('Chip disposed');
+      const id=`chip-control:${++sequence}`;pending.set(id,{resolve,reject});
+      try{port.postMessage({method,args,id});}catch(error){pending.delete(id);throw error;}
+    }catch(error){reject(error);}
+  })});
   Object.defineProperty(client, '_cancelClockRequests', {value: reason => {
-    for (const entry of pending.values()) entry.reject(new Error(reason));
-    pending.clear();
+    // Stop/control acknowledgements fence another port; retiring a script's
+    // pending clock edits must not make that fence resolve before physical Stop.
+    for (const [id,entry] of pending) if(entry.hz!==undefined){entry.reject(new Error(reason));pending.delete(id);}
   }});
   const dispose = client.dispose;
   if (dispose) client.dispose = () => {

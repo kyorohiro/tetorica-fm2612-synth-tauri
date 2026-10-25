@@ -33,12 +33,18 @@ export class LiveFX {
       if(!lengths){lengths=new Map();if(channels.length<=2)this.buffers.set(channels.length,lengths);}
       let buffers=lengths.get(n);
       if(!buffers){
-        buffers={input:channels.map(()=>new Float32Array(n)),output:channels.map(()=>new Float32Array(n))};
+        const input=channels.map(()=>new Float32Array(n)),output=channels.map(()=>new Float32Array(n));
+        // Compatible effects can replace a channel with their own PCM. Retain
+        // the rack's storage separately so malformed or replaced references
+        // cannot leak into the next effect or render quantum.
+        buffers={input,output,inputStorage:input.slice(),outputStorage:output.slice()};
         // A render quantum can be split at any sample. Cache those bounded
         // lengths; arbitrary standalone block sizes retain only the last size.
         if(n<=128&&channels.length<=2)lengths.set(n,buffers);
       }
       this.input=buffers.input;this.output=buffers.output;
+      this.inputStorage=buffers.inputStorage;this.outputStorage=buffers.outputStorage;
+      this.channelBuffers=buffers;
     }
     for(const [name,e] of this.effects){
       if(e.bypass){observe?.(name,channels,channels);continue;}
@@ -46,17 +52,52 @@ export class LiveFX {
       try {
         const result=e.fn(this.input,this.output,e.state,e.context);
         if(result&&typeof result.then==='function')throw new Error('Async process is not supported');
-        for(const channel of this.output)for(const value of channel)if(!Number.isFinite(value))throw new Error('Non-finite output');
+        if(this.input.length!==channels.length||this.output.length!==channels.length)throw new Error('Invalid channel count');
+        for(let ch=0;ch<channels.length;ch++){
+          if(!(this.input[ch] instanceof Float32Array)||this.input[ch].length!==n)throw new Error('Invalid input channel');
+          const channel=this.output[ch];
+          if(!(channel instanceof Float32Array)||channel.length!==n)throw new Error('Invalid output channel');
+          // Validate the numeric samples mixed below without creating a sample iterator.
+          for(let i=0;i<n;i++)if(!Number.isFinite(channel[i]))throw new Error('Non-finite output');
+        }
         const fadeFrames=Math.max(1,Math.round(this.rate*.005));
         for(let i=0;i<n;i++){
           const wet=e.fadeRemaining>0?1-e.fadeRemaining/fadeFrames:1;
           for(let ch=0;ch<channels.length;ch++){
             const processed=Math.max(-1,Math.min(1,this.output[ch][i]));
-            channels[ch][i]=this.input[ch][i]*(1-wet)+processed*wet;
+            // A DSP may sanitize a nonfinite source sample. Multiplying the
+            // original NaN/Infinity by zero would poison its valid wet output.
+            if(wet===1)channels[ch][i]=processed;
+            else{
+              const source=this.input[ch][i],dry=Number.isFinite(source)?source:0;
+              channels[ch][i]=dry*(1-wet)+processed*wet;
+            }
           }
           if(e.fadeRemaining>0)e.fadeRemaining--;
         }
-      }catch(error){e.bypass=true;report('[liveFx:'+name+'] '+(error?.stack??String(error))+'\nEffect bypassed. Fix the code and Apply to retry.');}
+      }catch(error){
+        e.bypass=true;
+        const stack=error?.stack,message=error?.message;
+        // Some engines expose stack frames without the Error's message.
+        const detail=typeof stack==='string'&&stack.length
+          ? typeof message==='string'&&message.length&&!stack.includes(message)?`${error.name??'Error'}: ${message}\n${stack}`:stack
+          : String(error);
+        report('[liveFx:'+name+'] '+detail+'\nEffect bypassed. Fix the code and Apply to retry.');
+      }
+      finally{
+        try{
+          this.input.length=this.output.length=channels.length;
+          for(let ch=0;ch<channels.length;ch++){
+            this.input[ch]=this.inputStorage[ch];this.output[ch]=this.outputStorage[ch];
+          }
+        }catch{
+          // A callback can also freeze or seal its mutated outer arrays.
+          // Recover only in that exceptional path; ordinary rendering never
+          // creates replacement channel lists or PCM storage.
+          this.input=this.channelBuffers.input=this.inputStorage.slice();
+          this.output=this.channelBuffers.output=this.outputStorage.slice();
+        }
+      }
       observe?.(name,this.input,channels);
     }
   }

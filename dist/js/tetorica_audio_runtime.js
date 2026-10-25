@@ -1,13 +1,14 @@
-import {SoundChipMixer} from './soundchip_mixer.js?v=chip-tabs-2';
+import {decodeAudioBuffer,normalizeLocalMediaUrl} from './audio_decode.js';
+import {SoundChipMixer} from './soundchip_mixer.js?v=y8950-adpcm-ui-1';
 /**
  * @file tetorica_audio_runtime.js
  * 実行環境: Browser（音声処理時）
  * 依存: AudioContext / AudioNode を使う音声ルーティング・エフェクト。
  * サンプルの URL 読み込みには fetch、デコードには AudioContext が必要。依存は一部注入可能。
  */
-import {samplePCM} from "./native_sample.js";
+import {samplePCM} from "./native_sample.js?v=audio-stability-2";
 import * as fx from "./megasynth_fx.js";
-import {createNativeFXRack} from "./native_fx_rack.js?v=prepared-fx-rerun-2";
+import {createNativeFXRack} from "./native_fx_rack.js?v=audio-stability-2";
 
 /**
  * Chip-independent browser audio state shared by Tetorica synths.
@@ -32,6 +33,8 @@ export class TetoricaAudioRuntime {
     /** @type {Set<AudioNode>} Non-audible observation branches after FX and master volume. */
     this.outputMonitors = new Set();
     this.fxChain = [];
+    this.nativeFXPreparation = null;
+    this.nativeFXGeneration = 0;
     this.sampleBuffers = new Map();
     this.sampleVoices = new Set();
     this.streamEntries = new Map();
@@ -138,11 +141,26 @@ export class TetoricaAudioRuntime {
   }
 
   async prepareNativeFX() {
-    if (!this.nativeFX) {
-      this.nativeFX = await createNativeFXRack(this.audioContext);
-      this.rebuildFXChain();
+    if (this.nativeFX) return this.nativeFX;
+    if (!this.nativeFXPreparation) {
+      const context = this.audioContext, generation = this.nativeFXGeneration;
+      const pending = createNativeFXRack(context).then(rack => {
+        // A synth can close while its rack is fetching/compiling. Never let
+        // that old preparation reconnect audio or survive into a new session.
+        if (generation !== this.nativeFXGeneration || context !== this.audioContext) {
+          rack.dispose();
+          throw new DOMException('Audio preparation cancelled', 'AbortError');
+        }
+        this.nativeFX = rack;
+        try { this.rebuildFXChain(); }
+        catch (error) { this.nativeFX = null; rack.dispose(); throw error; }
+        return rack;
+      });
+      this.nativeFXPreparation = pending;
+      const clear = () => { if (this.nativeFXPreparation === pending) this.nativeFXPreparation = null; };
+      pending.then(clear, clear);
     }
-    return this.nativeFX;
+    return this.nativeFXPreparation;
   }
 
   createFXApi(options = {}) {
@@ -990,6 +1008,8 @@ export class TetoricaAudioRuntime {
   }
 
   disposeFXChain() {
+    this.nativeFXGeneration++;
+    this.nativeFXPreparation = null;
     if (this.nativeFX) { this.nativeFX.dispose(); this.nativeFX = null; }
     const previous = this.fxChain;
     this.fxChain = [];
@@ -1208,21 +1228,6 @@ function fillClipNoise(data) {
   }
 }
 
-async function decodeAudioBuffer(
-  audioContext,
-  arrayBuffer
-) {
-  return new Promise(
-    (resolve, reject) => {
-      audioContext.decodeAudioData(
-        arrayBuffer.slice(0),
-        resolve,
-        reject
-      );
-    }
-  );
-}
-
 function normalizeFiniteNumber(
   value,
   fallback
@@ -1238,66 +1243,4 @@ function normalizeFiniteNumber(
     );
   }
   return numeric;
-}
-
-function normalizeLocalMediaUrl(url) {
-  const value = resolveBuiltInMediaAlias(
-    String(url)
-  );
-
-  if (
-    value.startsWith("data:") ||
-    value.startsWith("blob:")
-  ) {
-    return value;
-  }
-
-  if (
-    typeof location === "undefined" ||
-    !location?.href
-  ) {
-    return value;
-  }
-
-  const resolved = new URL(
-    value,
-    location.href
-  );
-
-  if (
-    resolved.origin !==
-    location.origin
-  ) {
-    throw new Error(
-      "Only same-origin media URLs are allowed in MegaSynth.sample/stream"
-    );
-  }
-
-  return resolved.href;
-}
-
-function resolveBuiltInMediaAlias(url) {
-  if (
-    typeof url !== "string" ||
-    url.length === 0
-  ) {
-    return url;
-  }
-
-  if (
-    url.startsWith("sonic-pi/") &&
-    !url.includes("://")
-  ) {
-    const sampleName =
-      url
-        .slice("sonic-pi/".length)
-        .replaceAll("-", "_");
-    return `./samples/sonic-pi/${sampleName}.flac`;
-  }
-
-  if (!url.startsWith("sonic-pi/")) {
-    return url;
-  }
-
-  return url;
 }

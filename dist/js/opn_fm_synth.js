@@ -13,7 +13,7 @@ import {noteToHz, opnPitchFromHz} from './soundchip_pitch.js';
  * YM2203 and YM2608 APIs as they grow.
  */
 
-/** @typedef {import('./ym2612synth.js').YM2612Transport} OPNTransport */
+/** @typedef {import('./ym2612synth.js?v=audio-stability-2').YM2612Transport} OPNTransport */
 
 const OPERATOR_COUNT = 4;
 const KEY_OPERATOR_BITS = [0x10, 0x20, 0x40, 0x80];
@@ -100,14 +100,15 @@ export class OPNDirectTransport {
 export class OPNWorkletTransport {
   /** @param {Uint8Array} bytes */
   loadRhythmRom(bytes) {
-    if (this.chipName !== 'YM2608') throw new Error('Rhythm ROM loading requires YM2608');
-    if (!(bytes instanceof Uint8Array) || bytes.length !== 8192) throw new RangeError('Expected 8192-byte rhythm ROM');
-    this.node.port.postMessage({type: 'loadRhythmRom', bytes});
+    if (this.disposed) return Promise.reject(new Error('ADPCM transport disposed'));
+    if (this.chipName !== 'YM2608') return Promise.reject(new Error('Rhythm ROM loading requires YM2608'));
+    if (!(bytes instanceof Uint8Array) || bytes.length !== 8192) return Promise.reject(new RangeError('Expected 8192-byte rhythm ROM'));
+    return this._loadMemory({type: 'loadRhythmRom', bytes}, 'rhythm-rom-loaded');
   }
-  /** @param {AudioWorkletNode|MessagePort|import('./soundchip_worklet.js?v=chip-tabs-2').WorkletSoundChip} node
+  /** @param {AudioWorkletNode|MessagePort|import('./soundchip_worklet.js?v=y8950-adpcm-ui-1').WorkletSoundChip} node
    * @param {{portCount:number,chipName:string}} config */
   constructor(node, { portCount, chipName }) {
-    /** @type {import('./soundchip_worklet.js?v=chip-tabs-2').WorkletSoundChip|null} */
+    /** @type {import('./soundchip_worklet.js?v=y8950-adpcm-ui-1').WorkletSoundChip|null} */
     this.endpoint = node?.execution === 'worklet' ? node : null;
     if (!node?.port && node?.postMessage) node = {port: node};
     if (!node?.port?.postMessage) {
@@ -120,9 +121,8 @@ export class OPNWorkletTransport {
     this.memoryRequests = new Map();
     this.disposed = false;
     this.onMemoryMessage = ({data}) => {
-      if (data?.type !== 'adpcm-memory-loaded') return;
-      const request = this.memoryRequests.get(data.id);
-      if (!request) return;
+      const request = this.memoryRequests.get(data?.id);
+      if (!request || data?.type !== request.resultType) return;
       this.memoryRequests.delete(data.id);
       data.error ? request.reject(new Error(data.error)) : request.resolve();
     };
@@ -138,16 +138,27 @@ export class OPNWorkletTransport {
   async close() {this.dispose(); await this.endpoint?.dispose();}
   flush() {return this.endpoint?.request('barrier') ?? Promise.resolve();}
 
-  /** @param {Uint8Array} bytes
+  /** YM2608: (bytes, address). YM2610/B: (memoryType, bytes, address), A=0 / B=1.
+   * @param {Uint8Array|0|1} typeOrBytes
+   * @param {Uint8Array|number} [bytesOrAddress]
    * @param {number} [address] */
-  loadAdpcmMemory(bytes, address = 0) {
+  loadAdpcmMemory(typeOrBytes, bytesOrAddress, address = 0) {
     if (this.disposed) return Promise.reject(new Error('ADPCM transport disposed'));
-    if (this.chipName !== 'YM2608') return Promise.reject(new Error('ADPCM memory upload requires YM2608'));
-    if (!(bytes instanceof Uint8Array) || !Number.isInteger(address) || address < 0 || address + bytes.length > 0x200000) return Promise.reject(new RangeError('Invalid ADPCM memory upload'));
+    const opna = this.chipName === 'YM2608';
+    const opnb = ['YM2610', 'YM2610B'].includes(this.chipName);
+    if (!opna && !opnb) return Promise.reject(new Error('ADPCM memory upload requires YM2608 or YM2610/B'));
+    const memoryType = opna ? undefined : typeOrBytes;
+    const bytes = opna ? typeOrBytes : bytesOrAddress;
+    if (opna) address = bytesOrAddress ?? 0;
+    if ((opnb && ![0, 1].includes(memoryType)) || !(bytes instanceof Uint8Array) || !Number.isInteger(address) || address < 0 || address + bytes.length > (opna ? 0x200000 : 0x1000000)) return Promise.reject(new RangeError('Invalid ADPCM memory upload'));
+    return this._loadMemory({type: 'loadAdpcmMemory', ...(opnb ? {memoryType} : {}), bytes, address}, 'adpcm-memory-loaded');
+  }
+
+  _loadMemory(command, resultType) {
     const id = ++this.memorySequence;
     return new Promise((resolve, reject) => {
-      this.memoryRequests.set(id, {resolve, reject});
-      try { this.node.port.postMessage({type: 'loadAdpcmMemory', id, bytes, address}); }
+      this.memoryRequests.set(id, {resolve, reject, resultType});
+      try { this.node.port.postMessage({...command, id}); }
       catch (error) { this.memoryRequests.delete(id); reject(error); }
     });
   }
@@ -155,7 +166,11 @@ export class OPNWorkletTransport {
   dispose() {
     this.disposed = true;
     this.node.port.removeEventListener?.('message', this.onMemoryMessage);
-    for (const request of this.memoryRequests.values()) request.reject(new Error('ADPCM transport disposed'));
+    this.cancelPending('ADPCM transport disposed');
+  }
+
+  cancelPending(reason = 'Run stopped') {
+    for (const request of this.memoryRequests.values()) request.reject(new Error(reason));
     this.memoryRequests.clear();
   }
 
@@ -174,6 +189,14 @@ export class OPNWorkletTransport {
       register,
       value,
     });
+  }
+
+  /** Apply a related register group in one worklet message.
+   * @param {Array<{port:number,register:number,value:number}>} writes */
+  writeBatch(writes) {
+    const commands = writes.map(({port, register, value}) => ({type:'write',
+      port:assertRange('port', port, 0, this.portCount - 1), register, value}));
+    this.node.port.postMessage(commands);
   }
 }
 
@@ -219,7 +242,7 @@ export class OPNFMSynth {
   }
 
   /** @param {number} channel
-   * @param {import('./ym2612synth.js').YM2612Preset} preset */
+   * @param {import('./ym2612synth.js?v=audio-stability-2').YM2612Preset} preset */
   setPreset(channel, preset) {
     this._assertChannel(channel);
     if (!preset || typeof preset !== "object") {
@@ -262,7 +285,7 @@ export class OPNFMSynth {
    * Apply partial operator settings in order, retaining repeated entries.
    * Validate the entire batch before changing state or writing registers.
    * @param {number} channel
-   * @param {Array<[number, import('./ym2612synth.js').YM2612OperatorParams]>} entries
+   * @param {Array<[number, import('./ym2612synth.js?v=audio-stability-2').YM2612OperatorParams]>} entries
    */
   setOperators(channel, entries) {
     this._assertChannel(channel);
@@ -278,13 +301,11 @@ export class OPNFMSynth {
 
   /** @param {number} channel
    * @param {number} operator
-   * @param {import('./ym2612synth.js').YM2612OperatorParams} params */
+   * @param {import('./ym2612synth.js?v=audio-stability-2').YM2612OperatorParams} params */
   setOperator(channel, operator, params) {
     this._assertChannel(channel);
     assertRange("operator", operator, 0, OPERATOR_COUNT - 1);
-    if (!params || typeof params !== "object") {
-      throw new Error("params must be an object");
-    }
+    params = validateOperatorParams(params);
 
     const state = this.channels[channel].operators[operator];
     const { port, channelOffset } = this._splitChannel(channel);
@@ -396,8 +417,10 @@ export class OPNFMSynth {
     const validFnum = assertRange("fnum", fnum, 0, 0x7ff);
     const registers = CHANNEL_3_SPECIAL_FREQUENCY_REGISTERS[operator];
     this.channels[2].specialFrequencies[operator] = { block: validBlock, fnum: validFnum };
-    this._write(0, registers.high, (validBlock << 3) | ((validFnum >> 8) & 0x07));
-    this._write(0, registers.low, validFnum & 0xff);
+    this._writeBatch([
+      {port:0, register:registers.high, value:(validBlock << 3) | ((validFnum >> 8) & 0x07)},
+      {port:0, register:registers.low, value:validFnum & 0xff},
+    ]);
   }
 
   /** Set frequency in Hz without KEY ON. @overload @param {number} channel @param {number} hz @returns {void} */
@@ -421,8 +444,10 @@ export class OPNFMSynth {
     state.block = validBlock;
     state.fnum = validFnum;
     const { port, channelOffset } = this._splitChannel(channel);
-    this._write(port, 0xa4 + channelOffset, (validBlock << 3) | ((validFnum >> 8) & 0x07));
-    this._write(port, 0xa0 + channelOffset, validFnum & 0xff);
+    this._writeBatch([
+      {port, register:0xa4 + channelOffset, value:(validBlock << 3) | ((validFnum >> 8) & 0x07)},
+      {port, register:0xa0 + channelOffset, value:validFnum & 0xff},
+    ]);
   }
 
   /** @param {number} channel
@@ -514,7 +539,7 @@ export class OPNFMSynth {
     return value;
   }
 
-  /** @param {import("./ym2612.js").Ym2612Hooks} [hooks] */
+  /** @param {import("./ym2612.js?v=audio-numeric-bindings-1").Ym2612Hooks} [hooks] */
   setHooks({ onWrite, onRead, onIrq } = {}) {
     assertHook("onWrite", onWrite);
     assertHook("onRead", onRead);
@@ -560,6 +585,18 @@ export class OPNFMSynth {
       this.transport.write(command);
     }
     this.hooks.onWrite?.(command);
+    this._syncIrq();
+  }
+
+  // OPN's frequency high latch is shared between channels. Finish both writes
+  // before calling observers, which can synchronously change another channel.
+  _writeBatch(commands) {
+    if (typeof this.transport.writeBatch === 'function') this.transport.writeBatch(commands);
+    else for (const command of commands) {
+      if (this.transport.write.length >= 3) this.transport.write(command.port, command.register, command.value);
+      else this.transport.write(command);
+    }
+    for (const command of commands) this.hooks.onWrite?.(command);
     this._syncIrq();
   }
 

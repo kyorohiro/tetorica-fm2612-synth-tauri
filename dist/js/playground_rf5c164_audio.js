@@ -1,3 +1,4 @@
+import {watchAudioEndpoint} from './playground_audio_endpoint.js?v=y8950-adpcm-ui-1';
 /** Browser setup shared by Playground and MegaSynth. PCM generation stays in the Worklet. */
 const nativeFetch = globalThis.fetch?.bind(globalThis);
 /** @param {AudioContext} context
@@ -21,7 +22,7 @@ export async function createRf5c164Audio(context, destination, options = {}) {
         if (!response.ok) throw new Error(`RF5C164 HTTP ${response.status}`);
         return response.arrayBuffer();
       }),
-    context.audioWorklet.addModule(options.workletUrl ?? new URL('./rf5c164-worklet.js?v=chip-tabs-2', import.meta.url)),
+    context.audioWorklet.addModule(options.workletUrl ?? new URL('./rf5c164-worklet.js?v=y8950-adpcm-ui-1', import.meta.url)),
   ]));
   signal?.throwIfAborted();
   const node = new AudioWorkletNode(context, 'tetorica-rf5c164', {
@@ -31,14 +32,15 @@ export async function createRf5c164Audio(context, destination, options = {}) {
   const dispose = () => {
     if (disposed) return;
     disposed = true;
-    node.port.postMessage({method: 'dispose'});
-    node.disconnect();
-    node.port.close();
-    channel?.port2.close();
+    node.port.onmessage=null;node.onprocessorerror=null;
+    try {node.port.postMessage({method:'dispose'});} catch {}
+    try {node.disconnect();} catch {}
+    node.port.close();channel?.port1.close();channel?.port2.close();
   };
   try {
     await wait(new Promise((resolve, reject) => {
       node.port.onmessage = ({data}) => {
+        if(data.type==='chip-inspector-result')return;
         if (data.ready) resolve();
         else if (data.error) reject(new Error(data.error));
       };
@@ -48,12 +50,9 @@ export async function createRf5c164Audio(context, destination, options = {}) {
     node.connect(destination);
     channel = new MessageChannel();
     node.port.postMessage({port: channel.port1}, [channel.port1]);
-    return {node, port: channel.port2, dispose};
+    return watchAudioEndpoint({node, port:channel.port2, dispose}, {context,label:'RF5C164',onError:options.onError});
   } catch (error) {
     dispose();
     throw error;
-  } finally {
-    node.port.onmessage = null;
-    node.onprocessorerror = null;
   }
 }
