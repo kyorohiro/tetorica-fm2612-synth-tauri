@@ -256,6 +256,8 @@
       .volume-control input[type="range"] {
         width: 120px;
       }
+      #masterVolumeRange { accent-color: #7cadd8; }
+      #masterVolumeRange[data-boosted="true"] { accent-color: #e8953d; }
 
       .volume-readout {
         min-width: 3.2em;
@@ -300,6 +302,10 @@
         gap: 8px;
         margin-bottom: 2px;
       }
+
+      .octave-control { display: inline-flex; align-items: center; gap: 6px; color: #b8cac6; font-size: 0.68rem; }
+      .octave-control button { min-width: 24px; }
+      .octave-control output { min-width: 1.5em; display: inline-block; text-align: center; }
 
       .fretboard-label {
         min-width: 0;
@@ -1388,7 +1394,7 @@
             <div class="volume-row">
               <label class="volume-control" for="masterVolumeRange">
                 <span>Vol</span>
-                <input id="masterVolumeRange" type="range" min="0" max="380" value="100" step="1">
+                <input id="masterVolumeRange" type="range" min="0" max="200" value="100" step="1" aria-label="Master volume, 0 to 200 percent">
                 <span id="masterVolumeValue" class="volume-readout">100%</span>
               </label>
             </div>
@@ -1397,6 +1403,11 @@
             <div class="control-section">
               <div class="fretboard-toolbar">
                 <div class="fretboard-row fretboard-summary">
+                  <div class="octave-control" role="group" aria-label="Keyboard octave" title="Transpose new notes by octaves. Changing octave releases held notes.">
+                    <button id="octaveDown" class="toolbar-button" type="button" aria-label="Lower keyboard by one octave">−</button>
+                    <span>Octave <output id="octaveValue">0</output></span>
+                    <button id="octaveUp" class="toolbar-button" type="button" aria-label="Raise keyboard by one octave">+</button>
+                  </div>
                   <div class="fret-display" id="fretDisplay">Fret: 0</div>
                   <div class="fret-display" id="stringDisplay">String 6-3</div>
                 </div>
@@ -1452,7 +1463,7 @@
     </div>
 
     <script type="module">
-      import "./synth.js?v=synth-preset-operators-1";
+      import "./synth.js?v=synth-master-200-1";
     </script>
   </body>
 </html>

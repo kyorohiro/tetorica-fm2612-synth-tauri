@@ -2,9 +2,11 @@ import {validateNesApuClock} from '../js/nesapu.js?v=nes-wasm-1';
 import {ym2203HighOperation} from './ym2203_high.js';
 import {exportRf5c164Vgm} from './rf5c164_vgm_export.js?v=vgm-frequency-order-2';
 export {exportRf5c164Vgm} from './rf5c164_vgm_export.js?v=vgm-frequency-order-2';
-import {Ym2612VGM} from '../js/ym2612vgm.js?v=vgm-frequency-order-2';
+import {Ym2612VGM} from '../js/ym2612vgm.js?v=pokey-vgm-1';
 import {maybeDecodeVgmFile} from '../js/vgm_file.js';
 import {looksLikeS98, convertS98ToVgm} from '../js/s98_file.js';
+import {validateWonderSwanVgm} from './wonderswan_vgm_import.js?v=wonderswan-import-3';
+import {validatePokeyVgm} from './pokey_vgm_import.js?v=pokey-import-1';
 
 const OPN = ['ym2203', 'ym2608', 'ym2610', 'ym2612'];
 export function detectVgmImport(header) {
@@ -29,6 +31,13 @@ export function detectVgmImport(header) {
   if (rf5c164 && chips.every(chip => ['rf5c164','psg'].includes(chip))) {
     return {...base, family:'rf5c164', supported:true, chip:'ym2612', message:'RF5C164 register and RAM conversion: Write / High, liveLoop, asynchronous timing. Schedule uses Write for RF5C164; accompanying FM/DAC/PSG are scheduled. Optional PSG requires the YM2612 Playground chip.'};
   }
+  if (chips.length === 1 && chips[0] === 'pokey') {
+    const raw = header.pokeyClock >>> 0, clock = raw & 0x3fffffff, chipCount = raw & 0x40000000 ? 2 : 1;
+    if (raw & 0x80000000) return {...base, message: 'POKEY variant-chip conversion is not supported.'};
+    if (clock < 100000 || clock > 100000000) return {...base, message: 'POKEY conversion requires a clock from 100000 to 100000000 Hz.'};
+    return {...base, family:'pokey', supported:true, clock, chipCount,
+      message:`POKEY${chipCount === 2 ? ' × 2' : ''}: ${clock} Hz, ${chipCount * 4} physical channels. Original register order, shared timers and dense DAC streams are preserved for one pass. Both chips start on the same audio frame; loops are not repeated.`};
+  }
   if (chips.some(chip => header[chip + 'Clock'] & 0x40000000)) return {...base, message: 'Dual-chip conversion is not supported.'};
   if (chips.length === 1 && chips[0] === 'gameBoyDmg') {
     if ((header.gameBoyDmgClock & 0x3fffffff) !== 4194304) return {...base, message: 'Game Boy conversion requires the standard 4194304 Hz clock.'};
@@ -41,6 +50,14 @@ export function detectVgmImport(header) {
     const region = clock < 1700000 ? 'PAL' : 'NTSC/Dendy';
     const fds = !!(header.nesApuClock & 0x80000000);
     return {...base, family: 'nes', supported: true, fds, clock, region, message: 'NES APU' + (fds ? ' + FDS' : '') + `: ${clock} Hz (${region}), all channels and DMC RAM uploads. One pass; loops are not repeated. Playback uses asynchronous waits and RAM acknowledgements, not sample-accurate scheduling.`};
+  }
+
+  if (chips.length === 1 && chips[0] === 'wonderswan') {
+    const rawClock = header.wonderswanClock >>> 0, clock = rawClock & 0x3fffffff;
+    if (rawClock & 0x80000000) return {...base, message: 'WonderSwan variant-chip conversion is not supported.'};
+    if (clock < 100000 || clock > 100000000) return {...base, message: 'WonderSwan conversion requires a clock from 100000 to 100000000 Hz.'};
+    return {...base, family: 'wonderswan', supported: true, clock,
+      message: `WonderSwan: ${clock} Hz, four channels, wave RAM, Noise, Sweep and Voice PCM. One pass; loops are not repeated. The prepared score runs at audio sample boundaries, including dense Voice PCM. Hyper Voice and DMA are not supported.`};
   }
 
   return {...base, message: chips.length > 1 ? 'This chip combination cannot be converted. No files will be changed.' : 'Conversion for this chip is not supported.'};
@@ -62,6 +79,14 @@ export async function prepareVgmImport(file) {
   }
   if (detection.family === 'rf5c164') {
     try { exportRf5c164Vgm(buffer, {loop:false}); }
+    catch (error) { detection = {...detection, supported:false, message:error.message}; }
+  }
+  if (detection.family === 'wonderswan') {
+    try { validateWonderSwanVgm(buffer); }
+    catch (error) { detection = {...detection, supported: false, message: error.message}; }
+  }
+  if (detection.family === 'pokey') {
+    try { validatePokeyVgm(buffer); }
     catch (error) { detection = {...detection, supported:false, message:error.message}; }
   }
   return {buffer, vgm, detection};

@@ -1,7 +1,7 @@
 /** Chip clocks are Hz, independent of output frames, VGM samples and BPM. */
 export const CHIP_CLOCKS = Object.freeze({ym2612:7670454, ym2203:4000000, ym2610:8000000, ym2610b:8000000,
   ym2608:8000000, ym2151:3579545, segapsg:3579545, gameboy:4194304,
-  nes:1789773, snes:1024000, x68000:4000000, huc6280:3579545, okim6258:8000000,
+  nes:1789773, snes:1024000, x68000:4000000, huc6280:3579545, wonderswan:3072000, pokey:1789790, okim6258:8000000,
   ay8910:1789773, msx:1789773, 'msx-audio':1789773, ym2413:3579545, ym3526:3579545, ym3812:3579545, y8950:3579545, ymf262:14318180,
   rf5c164:12500000, pwm:23011361});
 
@@ -46,7 +46,7 @@ export class ChipClockResampler {
  * @template T
  * @param {T} client @param {MessagePort} port @param {number} initialClock
  * @param {{primary?:boolean, batch?:boolean, onApplied?:(hz:number)=>void}} [options]
- * @returns {T & {readonly clock:number, setClock(hz:number):Promise<void>, _requestControl(method:string,args?:any[]):Promise<any>}}
+ * @returns {T & {readonly clock:number, setClock(hz:number):Promise<void>, _requestControl(method:string,args?:any[],transfer?:Transferable[]):Promise<any>}}
  */
 export function attachChipClock(client, port, initialClock, {primary = false, batch = false, onApplied = () => {}} = {}) {
   let clock = initialClock, sequence = 0, disposed = false;
@@ -75,11 +75,11 @@ export function attachChipClock(client, port, initialClock, {primary = false, ba
       catch (error) { pending.delete(id); throw error; }
     } catch (error) { reject(error); }
   });
-  Object.defineProperty(client,'_requestControl',{value:(method,args=[])=>new Promise((resolve,reject)=>{
+  Object.defineProperty(client,'_requestControl',{value:(method,args=[],transfer)=>new Promise((resolve,reject)=>{
     try{
       if(disposed)throw new Error('Chip disposed');
       const id=`chip-control:${++sequence}`;pending.set(id,{resolve,reject});
-      try{port.postMessage({method,args,id});}catch(error){pending.delete(id);throw error;}
+      try{port.postMessage({method,args,id},transfer);}catch(error){pending.delete(id);throw error;}
     }catch(error){reject(error);}
   })});
   Object.defineProperty(client, '_cancelClockRequests', {value: reason => {

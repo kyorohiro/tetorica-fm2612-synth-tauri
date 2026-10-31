@@ -1,4 +1,4 @@
-import { Ym2612VGM } from '../js/ym2612vgm.js?v=vgm-frequency-order-2';
+import { Ym2612VGM } from '../js/ym2612vgm.js?v=pokey-vgm-1';
 import { createTfiFromPreset } from '../js/tfi.js';
 
 // Snapshot OPN FM parameters at key-on. TFI does not retain pan, LFO,
