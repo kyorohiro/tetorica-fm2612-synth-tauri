@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path, PurePosixPath
 import shutil
 import stat
@@ -40,12 +41,127 @@ def unpack(archive, destination):
     return hashes
 
 
+LOCAL_REQUIRED = {'index.html', 'synth.js'}
+LOCAL_MANIFEST = 'local-changes.json'
+
+
+def safe_name(name):
+    if not isinstance(name, str) or not name or any(ord(char) < 32 or ord(char) == 127 for char in name):
+        raise ValueError('Expected a safe relative release file path')
+    path = PurePosixPath(name)
+    if (path.is_absolute() or name != path.as_posix() or '..' in path.parts
+            or name == '.' or '\\' in name or ':' in name):
+        raise ValueError(f'Unsafe local change path: {name}')
+    return name
+
+
+def valid_hash(value):
+    return isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value) is not None
+
+
+def snapshot_dist(root):
+    directory = root / 'dist'
+    if directory.is_symlink() or not directory.is_dir():
+        raise ValueError('Expected a real dist directory')
+    hashes = {}
+    for path in sorted(directory.rglob('*')):
+        if path.is_symlink():
+            raise ValueError(f'Symlinks are not release files: {path.relative_to(directory)}')
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise ValueError(f'Expected a regular release file: {path.relative_to(directory)}')
+        name = safe_name(path.relative_to(directory).as_posix())
+        hashes[name] = digest(path.read_bytes())
+    return hashes
+
+
+def baseline_files(lock):
+    files = lock.get('files') if isinstance(lock, dict) else None
+    if not isinstance(files, dict) or not valid_hash(lock.get('sha256')):
+        raise ValueError('Expected a pinned release SHA-256 and file hashes')
+    for name, sha in files.items():
+        safe_name(name)
+        if not valid_hash(sha):
+            raise ValueError(f'Invalid imported file SHA-256: {name}')
+    return files
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f'Duplicate local manifest property: {key}')
+        result[key] = value
+    return result
+
+
+def local_changes(root, lock):
+    path = root / LOCAL_MANIFEST
+    if path.is_symlink():
+        raise ValueError('Local change manifest must not be a symlink')
+    if not path.exists():
+        return None
+    baseline = baseline_files(lock)
+    manifest = json.loads(path.read_text(), object_pairs_hook=unique_object)
+    if (not isinstance(manifest, dict) or set(manifest) != {'schemaVersion', 'baseSha256', 'files'}
+            or type(manifest['schemaVersion']) is not int or manifest['schemaVersion'] != 1
+            or not isinstance(manifest['files'], dict)):
+        raise ValueError('Invalid local change manifest schema')
+    if manifest['baseSha256'] != lock['sha256']:
+        raise ValueError('Local changes belong to a different imported release; import and reapply edits')
+    for name, sha in manifest['files'].items():
+        safe_name(name)
+        if sha is None:
+            if name not in baseline:
+                raise ValueError(f'Cannot delete an unknown imported file: {name}')
+        elif not valid_hash(sha):
+            raise ValueError(f'Invalid local file SHA-256: {name}')
+    return manifest
+
+
+def require_entries(files):
+    missing = LOCAL_REQUIRED - files.keys()
+    if missing:
+        raise ValueError('Local edits must keep application entry files: ' + ', '.join(sorted(missing)))
+
+
+def record_local_changes(root):
+    lock = json.loads((root / 'release.lock.json').read_text())
+    baseline = baseline_files(lock)
+    local_changes(root, lock)  # Reject stale or malformed records before replacing them.
+    actual = snapshot_dist(root)
+    require_entries(actual)
+    changes = {name: actual.get(name) for name in sorted(baseline.keys() | actual.keys())
+               if actual.get(name) != baseline.get(name)}
+    manifest = {'schemaVersion': 1, 'baseSha256': lock['sha256'], 'files': changes}
+    destination = root / LOCAL_MANIFEST
+    if changes:
+        with tempfile.TemporaryDirectory(prefix='.local-edits-', dir=root) as temporary:
+            staging = Path(temporary) / LOCAL_MANIFEST
+            staging.write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
+            staging.replace(destination)
+        print(f"Recorded {len(changes)} local changes over Synth {lock['version']}; imported release hashes kept")
+    else:
+        destination.unlink(missing_ok=True)
+        print(f"Restored imported Synth {lock['version']}; no local changes")
+    return manifest
+
+
 def check(root):
     lock = json.loads((root / 'release.lock.json').read_text())
-    actual = {p.relative_to(root / 'dist').as_posix(): digest(p.read_bytes())
-              for p in (root / 'dist').rglob('*') if p.is_file()}
-    if actual != lock['files']:
-        raise ValueError('dist differs from release.lock.json; import the pinned ZIP again')
+    actual = snapshot_dist(root)
+    manifest = local_changes(root, lock)
+    expected = dict(lock['files'])
+    if manifest is not None:
+        for name, sha in manifest['files'].items():
+            if sha is None:
+                expected.pop(name)
+            else:
+                expected[name] = sha
+        require_entries(actual)
+    if actual != expected:
+        raise ValueError('dist has unrecorded changes; run npm run record:edits or import the pinned ZIP again')
     return lock
 
 
@@ -66,6 +182,7 @@ def import_release(root, archive):
             destination.rename(Path(temporary) / 'previous-dist')
         staging.rename(destination)
         previous.write_text(json.dumps(lock, indent=2, sort_keys=True) + '\n')
+        (root / LOCAL_MANIFEST).unlink(missing_ok=True)
     print(f'Imported {version}: {len(hashes)} files, SHA256 {sha}')
     return lock
 
@@ -73,14 +190,24 @@ def import_release(root, archive):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('zip', nargs='?', type=Path, help='Path to the Synth release ZIP')
-    parser.add_argument('--check', action='store_true')
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument('--check', action='store_true')
+    actions.add_argument('--record-local-changes', action='store_true')
     args = parser.parse_args()
-    if not args.check and args.zip is None:
+    if (args.check or args.record_local_changes) and args.zip is not None:
+        parser.error('choose a ZIP import, --check, or --record-local-changes')
+    if not args.check and not args.record_local_changes and args.zip is None:
         parser.error('provide the ZIP path: npm run import:release -- ./xxx.zip')
     try:
         if args.check:
             lock = check(ROOT)
-            print(f"Verified Synth {lock['version']}: {len(lock['files'])} files")
+            manifest = local_changes(ROOT, lock)
+            if manifest is None:
+                print(f"Verified Synth {lock['version']}: {len(lock['files'])} files")
+            else:
+                print(f"Verified locally edited Synth {lock['version']}: {len(manifest['files'])} recorded local changes over SHA256 {lock['sha256']}")
+        elif args.record_local_changes:
+            record_local_changes(ROOT)
         else:
             import_release(ROOT, args.zip)
     except (OSError, ValueError, zipfile.BadZipFile) as error:

@@ -8,7 +8,8 @@
     "import:release": "python3 scripts/import_release.py",
     "test": "python3 -m unittest discover -s tests && node --test tests/*.test.cjs",
     "tauri": "tauri",
-    "icons": "node scripts/generate-icons.mjs"
+    "icons": "node scripts/generate-icons.mjs",
+    "record:edits": "python3 scripts/import_release.py --record-local-changes"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.11.5"

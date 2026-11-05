@@ -70,7 +70,34 @@ npm run dev
 `index.html` と `synth.js` が ZIP のルートにある配布物を使います。
 `dist/` と `release.lock.json` を更新し、ZIP と各ファイルの SHA-256 を記録します。
 動作確認後、この2つを同じコミットに含めてください。ZIP は Git に含めません。
-`dev` / `build` 前の検査は、コミットされた `dist/` と lock の一致確認だけです。
+`dev` / `build` 前の検査では、取り込み原本と明示的に記録したローカル変更を照合します。
+
+## ソースを編集・再利用する
+
+`dist/synth.js`がアプリの入口です。`dist/synth_keyboard.js`などの各モジュールやCSSを直接編集できます。
+元のJavaScriptモジュールを実行する構成なので、編集後のbundle／minifyは不要です。
+`dist/generated/*_wasm.js`はWASM用の生成loaderなので、コンパイラーが出力した短縮コードです。
+音源の元ソースとライセンスは同梱のsources／ライセンス案内を参照してください。
+
+```sh
+# dist/synth.js や関連モジュール、CSSを編集する
+npm run record:edits
+npm run dev
+# 追加編集後は、dev/buildの前にもう一度記録する
+npm run record:edits
+npm run build
+```
+
+`record:edits`は変更・追加ファイルのSHA-256と任意ファイルの削除を、
+取り込みZIPのSHA-256に紐づく **local-changes.json** へ記録します。
+`index.html`と`synth.js`は残してください。
+`release.lock.json`と元ソースのreceiptは変更しません。原本の記録と改造の記録を分けています。
+
+起動・ビルド時は原本と記録済み変更を合成して照合します。後から加えた未記録の変更、
+別ZIP用のmanifest、不正な相対パス、symlinkは拒否します。すべて原本へ戻して記録するとmanifestを削除します。
+改造版を共有するときは、編集した`dist/`と`local-changes.json`を一緒に保存してください。
+新しいZIPの取り込みに成功すると`dist/`を置き換えてmanifestを消すので、先に改造をcommitまたはコピーしてください。
+不正なZIPでは現在のファイルとmanifestを保持します。`desktop/`の接続コードも通常どおり編集できます。
 
 ## ビルド
 
@@ -114,7 +141,7 @@ GitHub Actions の **Build Desktop** は macOS ARM64 / x86_64、Windows x86_64�
 
 ## 構成
 
-- `dist/`：上流 ZIP の内容。Tauri 用に書き換えません。
+- `dist/`：上流 ZIP の内容と、明示的に記録したローカルの改造。
 - `desktop/desktop-interface.js`：保存・再読み込み・最前面表示の接続。ローカルの main 画面だけに適用。
 - `desktop/audio-interface.js` / `audio-worklet.js`：出力設定と最終 PCM の捕捉。
 - `src-tauri/src/audio.rs`：Rust 出力デバイス・バイナリ IPC・バッファ管理。
