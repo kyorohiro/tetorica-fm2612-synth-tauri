@@ -19,7 +19,7 @@ From the repository root:
 ```sh
 node assets/opna-rhythm/generate.mjs
 node assets/opna-rhythm/generate.mjs --check
-node --test web/opna_rhythm_rom.test.mjs
+node --test test/runtime/opna_rhythm_rom.test.mjs
 ```
 
 The generator uses sine waves, pitch envelopes and seeded noise. No input ROM
@@ -47,19 +47,19 @@ its default parameters reproduce the checked-in binary exactly.
 The rhythm example uses these sounds by default:
 
 ```sh
-node examples/nodejs/main_ym2608_rhythm_wave.js rhythm.wav
+node tetorica_examples/nodejs/main_ym2608_rhythm_wave.js rhythm.wav
 ```
 
 An explicit ROM path still overrides the default:
 
 ```sh
-node examples/nodejs/main_ym2608_rhythm_wave.js rhythm.wav /path/to/ym2608_adpcm_rom.bin
+node tetorica_examples/nodejs/main_ym2608_rhythm_wave.js rhythm.wav /path/to/ym2608_adpcm_rom.bin
 ```
 
 The existing CLI can load the replacement directly:
 
 ```sh
-npx tetorica-vgm@0.2.1 render music.vgm --ym2608-rom web/tetorica_ym2608_adpcm_rom.bin --output music.wav
+npx tetorica-vgm@0.2.1 render music.vgm --ym2608-rom tetorica_src/runtime/tetorica_ym2608_adpcm_rom.bin --output music.wav
 ```
 
 For software that requires the filename `ym2608_adpcm_rom.bin`, copy the file
@@ -67,7 +67,7 @@ under that name into its ROM directory. Loaders that require an original ROM
 checksum may reject a replacement. This data is for ADPCM-A rhythm voices,
 not the independently loaded ADPCM-B sample memory.
 
-The canonical binary is `web/tetorica_ym2608_adpcm_rom.bin`. Release locations:
+The canonical binary is `tetorica_src/runtime/tetorica_ym2608_adpcm_rom.bin`. Release locations:
 
 - npm: `dist/web/tetorica_ym2608_adpcm_rom.bin`.
 - Analyzer, Synth, Playground and browser examples ZIPs: `js/tetorica_ym2608_adpcm_rom.bin`.

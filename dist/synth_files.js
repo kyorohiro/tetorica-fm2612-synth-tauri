@@ -1,7 +1,7 @@
 import {renderFileTree} from './playground/playground_file_tree.js';
-import {isSynthTonePath, isSynthStatePath} from './synth_project.js';
+import {isSynthTonePath, isSynthStatePath} from './synth_project.js?v=op-gates-1';
 import {isCheckpointPath} from './js/tetorica_virtual_files/filesystem.js';
-import {createToneRecovery, parseToneRecovery} from './synth_recovery.js';
+import {createToneRecovery, parseToneRecovery} from './synth_recovery.js?v=op-gates-1';
 
 const basename = path => path.split('/').pop();
 const dirname = path => path.slice(0, path.lastIndexOf('/')) || '/';
@@ -20,7 +20,7 @@ async function openDraftStore() {
   });
 }
 
-export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, applySnapshot, onSaved, onListChanged, stopAllNotes, setStatus}) {
+export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, applySnapshot, onSaved, onListChanged, onWorkspaceReplaced, isObserving=()=>false, stopAllNotes, setStatus}) {
   const byId = id => document.getElementById(id);
   const panel = byId('synthFilesPanel'), tree = byId('synthFilesTree');
   const toggle = byId('synthFilesToggle'), workspace = byId('synthWorkspace');
@@ -118,25 +118,26 @@ export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, a
     syncFeedbackTimer = setTimeout(clearSyncFeedback, 1800);
   }
   function updateButtons() {
+    const readOnly = isObserving();
     const modified = Boolean(activeTonePath && project.isToneModified(activeTonePath));
     if (syncFeedback && (syncFeedback !== activeTonePath || dirty || modified)) clearSyncFeedback();
-    syncButton.disabled = busy;
-    revertButton.disabled = busy || !activeTonePath || !modified;
+    syncButton.disabled = busy || readOnly;
+    revertButton.disabled = busy || readOnly || !activeTonePath || !modified;
     byId('synthFileDirty').textContent = dirty ? 'Not recorded' : unprotectedChanges ? 'Recording…' : modified ? 'Modified' :
       activeTonePath ? (project.fs.checkpoints.has(activeTonePath) ? 'Synced' : 'Current') : '';
     byId('synthActiveFilePath').textContent = !draftLoaded ? 'Restoring local project…' : activeTonePath || 'Built-in instrument';
     byId('synthFileUndoButton').disabled = busy || !history.length;
     document.querySelector('.synth-editor').setAttribute('aria-busy', String(busy));
-    for (const id of ['commonControls','operatorControls','channel3SpecialControls']) byId(id).inert = busy;
+    for (const id of ['commonControls','operatorControls','channel3SpecialControls']) byId(id).inert = busy || readOnly;
     for (const id of ['synthFileDuplicateButton','synthFileRenameButton','synthFileDeleteButton']) {
       byId(id).disabled = busy || !selectedPath || selectedPath === '/';
     }
-    byId('synthFileNewButton').disabled = busy;
+    byId('synthFileNewButton').disabled = busy || readOnly;
     byId('synthFileNewFolderButton').disabled = busy;
     byId('importPresetButton').disabled=busy;
     byId('importCassetteButton').disabled=busy;
     byId('exportCassetteButton').disabled=busy;
-    byId('presetSelect').disabled=busy;
+    byId('presetSelect').disabled=busy||readOnly;
   }
   function render() {
     document.body.classList.toggle('synth-files-open',!panel.hidden);
@@ -276,6 +277,7 @@ export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, a
     try {
       // Validate before switching, so a bad file never changes the sound.
       const tone = isSynthTonePath(path) ? project.readTone(path) : null;
+      if (tone && isObserving()) {setStatus('Choose Synth to edit an instrument.'); return false;}
       if (tone && path !== activeTonePath && !await flushEdits()) return false;
       selectedPath = path;
       project.select(path);
@@ -293,6 +295,7 @@ export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, a
     finally {busy=false;updateButtons();}
   }
   async function selectPreset(id) {
+    if (isObserving()) {setStatus('Choose Synth to edit an instrument.'); return false;}
     if (id.startsWith('vfs:')) return selectFile(id.slice(4));
     if (id === 'custom') return true;
     if (busy) return false;
@@ -304,8 +307,26 @@ export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, a
     } catch (error) {report(error);return false;}
     finally {busy=false;updateButtons();}
   }
+  async function createFromPreset(preset,name) {
+    if(busy)return false;
+    busy=true;updateButtons();
+    try {
+      if(!await flushEdits())return false;
+      pushUndo();
+      const tone=project.createTone(preset,name);
+      stopAllNotes();
+      activeTonePath=selectedPath=tone.path;dirty=false;
+      applySnapshot(tone.preset,'vfs:'+tone.path);onSaved(tone.path);
+      setBaseline();protectCurrentTone();reveal(tone.path);render();
+      await remember(true);
+      setStatus(`Copied to ${tone.path}. Edit the sound or Sync to keep a checkpoint.`);
+      return true;
+    } catch(error) {report(error);return false;}
+    finally {busy=false;updateButtons();}
+  }
   async function perform(action, path = selectedPath) {
     if (busy) return;
+    if (isObserving() && ['sync','revert','new'].includes(action)) {setStatus('Choose Synth to edit an instrument.'); return;}
     busy=true;updateButtons();
     closeMenu();
     try {
@@ -317,6 +338,7 @@ export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, a
         if (history.length) {
           const previous = history.pop();
           project.restore(previous.project);
+          onWorkspaceReplaced?.();
           workspaceId = newWorkspaceId(); generation = 0;
           activeTonePath = previous.activeTonePath; selectedPath = previous.selectedPath; dirty = previous.dirty;
           basePresetId=previous.basePresetId;basePreset=previous.basePreset;
@@ -379,16 +401,24 @@ export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, a
     busy=true;updateButtons();
     const requestGeneration=++importGeneration;let previous;
     const importError=byId('presetImportError'), notice=byId('presetImportNotice');
-    importError.hidden=true;notice.hidden=true;setStatus('Loading instruments…');
+    importError.hidden=true;notice.hidden=true;setStatus('Importing files…');
     try{
       if(!await flushEdits())return;
       previous=capture();
       const result=await project.importInstrumentFiles(selection,{...(directory?{directory}:{}),isCurrent:()=>requestGeneration===importGeneration});
       if(result.cancelled)return;
-      if(result.paths.length){pushUndo(previous);activeTonePath=selectedPath=result.paths[0];dirty=false;stopAllNotes();applyPreset('vfs:'+activeTonePath);setBaseline();reveal(activeTonePath);panel.hidden=false;workspace.classList.add('has-files');toggle.setAttribute('aria-expanded','true');toggle.classList.add('is-selected');}
+      const sourcePaths=result.sourcePaths;
+      if(result.paths.length||sourcePaths.length){
+        pushUndo(previous);
+        if(result.paths.length){activeTonePath=selectedPath=result.paths[0];dirty=false;stopAllNotes();applyPreset('vfs:'+activeTonePath);setBaseline();reveal(activeTonePath);}
+        else{selectedPath=sourcePaths[0];project.select(selectedPath);}
+        for(const path of sourcePaths)reveal(path);
+        byId('synthFileSelectionInfo').textContent=result.paths.length?activeTonePath:`${selectedPath} · Original VGM saved in Cassette`;
+        panel.hidden=false;workspace.classList.add('has-files');toggle.setAttribute('aria-expanded','true');toggle.classList.add('is-selected');
+      }
       if(result.failures.length){importError.textContent=`Could not load some files:\n${result.failures.join('\n')}${result.paths.length?'':' Previous presets were kept.'}`;importError.hidden=false;}
       notice.textContent=result.notices.join('\n');notice.hidden=!result.notices.length;
-      setStatus(`Loaded ${result.paths.length} instrument(s).${result.failures.length?' Some files could not be loaded.':''}`);
+      setStatus(`Loaded ${result.paths.length} instrument(s).${sourcePaths.length?` Saved ${sourcePaths.length} original VGM file(s) in /vgm/.`:''}${result.failures.length?' Some files could not be loaded.':''}`);
       render();await remember(true);
     }catch(error){report(error);}finally{busy=false;updateButtons();document.activeElement?.blur?.();}
   }
@@ -402,6 +432,7 @@ export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, a
       const result=await project.importCassette(new Uint8Array(await file.arrayBuffer()),{name:file.name,isCurrent:()=>requestGeneration===importGeneration});
       if(result.cancelled)return;
       workspaceId=newWorkspaceId();generation=0;
+      onWorkspaceReplaced?.();
       pushUndo(previous);dirty=false;selectedPath=project.selectedPath;activeTonePath=isSynthTonePath(selectedPath)?selectedPath:null;
       stopAllNotes();if(activeTonePath){applyPreset('vfs:'+activeTonePath);reveal(activeTonePath);}else applyPreset('one-op-basic');setBaseline();
       panel.hidden=false;workspace.classList.add('has-files');toggle.setAttribute('aria-expanded','true');toggle.classList.add('is-selected');
@@ -503,7 +534,7 @@ export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, a
     }catch(error){restoring=false;setStatus(`Local draft unavailable: ${error.message}. Cassette import/export is still available.`);}
     finally{draftLoaded=true;busy=false;if(dirty)persistCurrentTone();render();remember();}
   })();
-  return {ready, selectFile, selectPreset, importInstruments, get activeTonePath(){return activeTonePath;},
+  return {ready, selectFile, selectPreset, importInstruments, createFromPreset, get activeTonePath(){return activeTonePath;},
     get dirty(){return dirty||Boolean(activeTonePath&&project.isToneModified(activeTonePath));},
     markDirty(){dirty=true;clearSyncFeedback();if(draftLoaded&&!busy)persistCurrentTone();else updateButtons();}, refresh:render};
 }

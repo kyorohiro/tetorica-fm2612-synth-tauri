@@ -1,13 +1,19 @@
-import {createSynthProject} from './synth_project.js?v=auto-sync-1';
-import {setupSynthFiles} from './synth_files.js?v=auto-sync-1';
+import {createSynthProject} from './synth_project.js?v=op-gates-1';
+import {setupSynthFiles} from './synth_files.js?v=op-gates-1';
+import {setupSynthSongControls} from './synth_song_controls.js?v=song-seek-1';
+import {createSynthLiveHighlighter} from './synth_live_highlight.js';
+import {createSynthSongVoice, describeSynthSongVoice} from './synth_song_voice.js?v=vgm-mix-copy-1';
+import {createSynthPerformanceTarget} from './synth_performance.js?v=op-gates-1';
+import {SynthRecordingManager} from './synth_recording.js?v=op-gates-1';
+import {SynthLooper,applySynthLooperPatch} from './synth_looper.js?v=op-gates-1';
 import { setupSynthMenu } from './synth_menu.js';
 import { createSynthOutputVisualizer } from "./synth_output_visualizer.js";
 import { applyModulation, modulationSettings } from "./synth_modulation.js";
-import {applyPitchBend, bendPitch} from './synth_pitch_bend.js';
+import {applyPitchBend} from './synth_pitch_bend.js';
 import {
   FM_PRESETS,
   FM_PRESET_ORDER,
-  MegaSynthLooper,
+  MegaDriveSynth,
 } from "./js/megasynth.js";
 import { YM2612_CLOCK } from "./js/ym2612.js";
 import {
@@ -34,7 +40,7 @@ import {
   createParamControl,
   buildOperatorControls as buildOperatorControlsView,
   displayOperatorToApiOperator,
-} from "./synth_controls.js";
+} from "./synth_controls.js?v=op-gates-1";
 import {
   attachOutputEnvelopeTap,
   chooseVoice,
@@ -45,7 +51,7 @@ import {
 } from "./synth_runtime.js";
 import {
   createSynthInputController,
-} from "./synth_input.js";
+} from "./synth_input.js?v=vgm-audition-1";
 
 const status = document.getElementById("status");
 
@@ -113,6 +119,7 @@ const operatorHeaderRoot =
   document.getElementById("operatorHeader");
 const synthProject = createSynthProject();
 let synthFiles = null;
+let songControls = null;
 
 const presetSelect =
   document.getElementById("presetSelect");
@@ -164,8 +171,8 @@ const visualModeButtons = document.querySelectorAll('[data-visual-mode]');
 const visualizerDescription = document.getElementById('visualizerDescription');
 const visualDescriptions = {
   envelope: 'Drag OP1–OP4 points · Cyan: live chip-output RMS.',
-  waveform: 'Final output waveform · live + looper · after FX and volume.',
-  spectrum: 'Final output spectrum · live + looper · after FX and volume · dB.',
+  waveform: 'Final output waveform · live + looper + VGM · after volume.',
+  spectrum: 'Final output spectrum · live + looper + VGM · after volume · dB.',
 };
 for (const button of visualModeButtons) {
   button.addEventListener('keydown', event => {
@@ -178,7 +185,7 @@ for (const button of visualModeButtons) {
       item.classList.toggle('is-selected', selected);
       item.setAttribute('aria-pressed', String(selected));
     }
-    visualizerDescription.textContent = visualDescriptions[visualMode];
+    refreshVisualizerDescription();
     const editing = visualMode === 'envelope';
     operatorEnvelopeRoot.hidden = !editing;
     operatorEnvelopeRoot.parentElement.classList.toggle('is-editing-envelope', editing);
@@ -216,7 +223,7 @@ for (const modulationWheel of modulationWheels) {
     modulationWheelValue = Number(modulationWheel.value);
     for (const wheel of modulationWheels) wheel.value = String(modulationWheelValue);
     for (const readout of modulationValues) readout.textContent = `${Math.round(modulationWheelValue / 127 * 100)}%`;
-    if (synth) applyModulation(synth, commonState, modulationWheelValue, VOICE_COUNT);
+    if (synth && !songLiveView) applyModulation(synth, commonState, modulationWheelValue, VOICE_COUNT);
   });
   // Keep range-keyboard controls separate from the fretboard's arrow shortcuts.
   modulationWheel.addEventListener('keydown', event => {
@@ -245,13 +252,7 @@ function updatePitchBend(value) {
   for (const wheel of pitchBendWheels) wheel.value = String(value);
   for (const readout of pitchBendValues) readout.textContent = `${pitchBendSemitones > 0 ? '+' : ''}${pitchBendSemitones.toFixed(2)}`;
   if (synth) {
-    applyPitchBend(synth, voices, pitchBendSemitones);
-    if (channel3SpecialState.enabled) {
-      channel3SpecialState.frequencies.forEach((basePitch, operator) => {
-        const pitch = bendPitch(basePitch, pitchBendSemitones);
-        synth.setChannel3SpecialFrequency(operator, pitch.block, pitch.fnum);
-      });
-    }
+    applyPitchBend(songAuditionVoice ?? getEditorPlayableSynth(), voices, pitchBendSemitones);
   }
 }
 for (const wheel of pitchBendWheels) {
@@ -355,8 +356,33 @@ let currentPresetName =
 let importedTfiName = "";
 let currentPresetPan = {left:true, right:true};
 let currentPresetB4 = 0xc0;
+let currentPerformanceVoice = null;
 let activeHelpId = "";
 let masterVolume = 1;
+let songLiveView = null;
+let songLiveSignature = '';
+let liveHighlighter=null;
+const songHighlightToggle=document.getElementById('synthSongHighlightToggle');
+const LIVE_HIGHLIGHT_PREFERENCE='tetorica-fm2612-synth-live-highlight';
+try {songHighlightToggle.checked=localStorage.getItem(LIVE_HIGHLIGHT_PREFERENCE)!=='off';} catch {}
+songHighlightToggle.addEventListener('change',()=>{
+  const enabled=songHighlightToggle.checked;
+  try {localStorage.setItem(LIVE_HIGHLIGHT_PREFERENCE,enabled?'on':'off');} catch {}
+  liveHighlighter?.setEnabled(enabled);
+  liveHighlighter?.update(songLiveView);
+  songHighlightToggle.blur();
+});
+let songTargetState = {target:'synth', playback:'stopped', view:null};
+let songAuditionVoice = null, songAuditionMegaSynth = null, songAuditionReady = null;
+let songAuditionBus = null, songAuditionSignature = '', songAuditionGeneration = 0;
+let recordingEpoch=0, referenceRecordingStop=null;
+const editorPerformanceTarget=createSynthPerformanceTarget({
+  getSynth:()=>synth,
+  getVoice:getCurrentPerformanceVoice,
+  onCapturedCommand:(command,perform)=>megaSynth?.recordingManager?.perform
+    ?megaSynth.recordingManager.perform(command,perform):perform(),
+});
+const loopPerformanceTarget=createSynthPerformanceTarget({getSynth:()=>loopSynth});
 
 const DEFAULT_OPERATOR_STATE = Object.freeze({
   dt: 0,
@@ -377,14 +403,15 @@ const operatorStates = Object.fromEntries(
 
 const commonControls = new Map();
 const operatorControls = new Map();
+const operatorGateControls = new Map();
 let envelopeSelectionRevision = 0;
 const operatorEnvelopeRoot = document.getElementById('synthEnvelopeEditor');
 const operatorEnvelopeView = createOperatorEnvelopeView({
   root: operatorEnvelopeRoot,
-  getOperators: () => operatorStates,
+  getOperators: () => songLiveView?.snapshot.channels[songLiveView.channel].preset.operators ?? operatorStates,
   getSelectionKey: () => envelopeSelectionRevision,
   onEdit: applyOperatorParams,
-  getOutputEnvelope: () => ({
+  getOutputEnvelope: () => songLiveView ? null : ({
     history: outputEnvelopeHistory,
     heldVoicePeak: outputEnvelopeHeldVoicePeak,
     silenceFloor: OUTPUT_ENVELOPE_SILENCE_FLOOR,
@@ -524,6 +551,170 @@ function applyMasterVolume() {
   loopMegaSynth?.setMasterVolume(
     masterVolume
   );
+  songControls?.setVolume(masterVolume);
+  songAuditionMegaSynth?.setMasterVolume(masterVolume);
+}
+
+function isSongChannelTarget() {
+  return songTargetState.target !== 'synth' && ['loading','playing','paused','seeking'].includes(songTargetState.playback);
+}
+
+function isPerformanceInputEnabled() {
+  return !switchingAudioOutput && !referenceRecordingStop && songTargetState.playback !== 'seeking' && (!isSongChannelTarget() || Boolean(songAuditionVoice));
+}
+
+function getCurrentPerformanceVoice() {
+  if(!currentPerformanceVoice&&!channel3SpecialState.enabled)return null;
+  return {keyMask:currentPerformanceVoice?.keyMask??15,specialMode:channel3SpecialState.enabled,
+    specialFrequencies:channel3SpecialState.enabled?channel3SpecialState.frequencies:[]};
+}
+
+function recordingBlocked() {
+  return switchingAudioOutput||Boolean(referenceRecordingStop)||
+    ['loading','playing','seeking'].includes(songTargetState.playback)||isSongChannelTarget();
+}
+
+function recordingOperationCurrent(epoch) {return epoch===recordingEpoch&&!recordingBlocked();}
+
+function restoreEditorAfterEventPlayback() {
+  stopAllNotes();
+  synth?.reset();
+  applyPatchToVoices();
+  updateEventRecordUi();
+}
+
+// Stop asynchronous recording/capture before reference audio may start. The
+// epoch also invalidates actions that were still waiting for audio readiness.
+function stopRecordingForReference() {
+  ++recordingEpoch;
+  if(referenceRecordingStop)return referenceRecordingStop;
+  stopAllNotes();
+  if(megaSynth?.isRecording())megaSynth.stopRecord();
+  megaSynth?.stopRecordingPlayback();
+  eventRecordSessionActive=false;
+  stopLooperAudioPlayback();
+  if(loopOutputBus)loopOutputBus.gain.value=0;
+  const pending=Promise.resolve().then(()=>looper?.stop()).then(()=>{
+    stopLooperAudioPlayback();
+    loopSynth?.reset();
+    stopAllNotes();
+  }).finally(()=>{
+    if(referenceRecordingStop!==pending)return;
+    stopLooperAudioPlayback();
+    loopSynth?.reset();
+    synth?.reset();
+    applyPatchToVoices();
+    referenceRecordingStop=null;
+    if(loopOutputBus)loopOutputBus.gain.value=1;
+    updateLooperUi();updateEventRecordUi();updateKeyboardAvailability();
+  });
+  referenceRecordingStop=pending;
+  pending.catch(error=>setStatus(`Unable to stop recording: ${error.message}`));
+  updateLooperUi();updateEventRecordUi();updateKeyboardAvailability();
+  return pending;
+}
+
+// A third, lazy keyboard chip keeps audition notes out of the song engine,
+// original editor chip, and looper/event recorder. It shares the final output
+// and Master level, but has its own mute for release tails at mode changes.
+function ensureSongAuditionReady() {
+  if (songAuditionReady) return songAuditionReady;
+  if (!songAuditionBus) {
+    songAuditionBus = audioContext.createGain();
+    songAuditionBus.gain.value = 0;
+    songAuditionBus.connect(finalOutputBus);
+  }
+  const candidate = new MegaDriveSynth({audioContext, workletUrl:activeWorkletUrl,
+    ym2612WasmUrl:activeYm2612WasmUrl, outputNode:songAuditionBus, masterVolume});
+  songAuditionMegaSynth = candidate;
+  songAuditionReady = candidate.start().then(() => candidate.fm).catch(error => {
+    void candidate.close();
+    if (songAuditionMegaSynth === candidate) {
+      songAuditionReady = null;
+      songAuditionMegaSynth = null;
+    }
+    throw error;
+  });
+  return songAuditionReady;
+}
+
+function setSongTargetState(next) {
+  const wasPlaying=['loading','playing','seeking'].includes(songTargetState.playback);
+  const startingSeek=next.playback==='seeking'&&songTargetState.playback!=='seeking';
+  const recordingStateChanged=next.playback!==songTargetState.playback||next.target!==songTargetState.target;
+  const leavingEditor=songTargetState.target==='synth'&&next.target!=='synth'&&next.playback==='paused';
+  const channelTarget = next.target !== 'synth' && ['loading','playing','paused','seeking'].includes(next.playback);
+  const audition = channelTarget && next.playback === 'paused' ? next.view : null;
+  const signature = JSON.stringify([channelTarget ? next.target : 'synth', channelTarget && next.playback,
+    audition?.snapshot.revision, audition?.snapshot.frame]);
+  songTargetState = next;
+  if(startingSeek||!wasPlaying&&['loading','playing'].includes(next.playback)||leavingEditor)void stopRecordingForReference();
+  if(recordingStateChanged){updateLooperUi();updateEventRecordUi();}
+  if (signature === songAuditionSignature) return;
+  songAuditionSignature = signature;
+  const generation = ++songAuditionGeneration;
+  stopAllNotes();
+  songAuditionVoice = null;
+  if (songAuditionBus) songAuditionBus.gain.value = 0;
+  songAuditionMegaSynth?.fm?.reset();
+  // The wheels are performance state, not part of a captured instrument.
+  updatePitchBend(0);
+  updateKeyboardAvailability();
+  if (!audition) return;
+  const description = describeSynthSongVoice(audition.snapshot, audition.channel);
+  if (!description.playable) return;
+  keyboard.dataset.songAudition = 'loading';
+  void ensureSongAuditionReady().then(chip => {
+    if (generation !== songAuditionGeneration) return;
+    const voice = createSynthSongVoice(chip, audition.snapshot, audition.channel);
+    songAuditionVoice = {...voice, noteOn(...args) {
+      songAuditionBus.gain.value = 1;
+      voice.noteOn(...args);
+    }};
+    updateKeyboardAvailability();
+  }).catch(error => {
+    if (generation !== songAuditionGeneration) return;
+    keyboard.dataset.songAudition = 'unavailable';
+    setStatus(`CH${audition.channel + 1} audition failed: ${error.message}`);
+  });
+}
+
+function refreshVisualizerDescription() {
+  visualizerDescription.textContent = visualMode === 'envelope' && songLiveView
+    ? `${songLiveView.paused ? 'Paused' : songLiveView.following ? 'Live' : 'Frozen'} CH${songLiveView.channel + 1} · written settings · envelope guides · read-only.`
+    : visualDescriptions[visualMode];
+}
+
+function setSongLiveView(next) {
+  const active = Boolean(next);
+  const changedMode = active !== Boolean(songLiveView);
+  const voice = next?.snapshot.channels[next.channel];
+  const signature = next ? JSON.stringify([next.channel, next.paused, voice,
+    next.snapshot.lfo, next.snapshot.dacEnabled, next.snapshot.channels[2].specialMode,
+    next.snapshot.channels[2].specialFrequencies]) : '';
+  songLiveView = next;
+  if (changedMode) {
+    envelopeSelectionRevision++;
+    document.querySelector('.synth-editor').dataset.liveView = String(active);
+    operatorEnvelopeRoot.querySelector('.operator-envelope-plot').inert = active;
+    exportTfiButton.disabled = exportVgiButton.disabled = active;
+    for (const wheel of modulationWheels) wheel.disabled = active;
+    synthFiles?.refresh();
+  }
+  if (signature !== songLiveSignature) {
+    songLiveSignature = signature;
+    // updateVisual changes only the control's displayed/edit basis. The actual
+    // instrument state, original files and keyboard synth remain untouched.
+    syncControlsFromState();
+    renderAlgorithmDiagram();
+    renderChannel3SpecialMonitor();
+    operatorEnvelopeView.invalidateOutput();
+    drawEnvelopeGuide();
+  }
+  // The helper also sees transport/follow changes when parameter values stay
+  // identical, so Pause / Live Off / CH changes cannot leave a stale pulse.
+  liveHighlighter?.update(next);
+  refreshVisualizerDescription();
 }
 
 function formatLooperProgress(
@@ -555,6 +746,12 @@ function formatLooperProgress(
 }
 
 function updateLooperUi() {
+  const blocked=recordingBlocked();
+  if(looperStartButton) {
+    looperStartButton.disabled=blocked;
+    looperStartButton.title=blocked?'Pause or Stop the VGM and choose Synth to use the looper.':'';
+  }
+  if(looperRecordButton)looperRecordButton.disabled=blocked;
   if (!looper) {
     if (looperStateRoot) {
       looperStateRoot.textContent =
@@ -661,6 +858,8 @@ function updateEventRecordUi() {
     recording?.commands?.length ?? 0;
 
   if (eventRecordStartButton) {
+    eventRecordStartButton.disabled=recordingBlocked();
+    eventRecordStartButton.title=recordingBlocked()?'Pause or Stop the VGM and choose Synth to record.':'';
     eventRecordStartButton.textContent =
       eventRecordSessionActive
         ? "Event Rec Stop"
@@ -671,7 +870,7 @@ function updateEventRecordUi() {
     eventRecordStopButton.hidden =
       !eventRecordSessionActive;
     eventRecordStopButton.disabled =
-      !eventRecordSessionActive;
+      !eventRecordSessionActive||recordingBlocked();
     eventRecordStopButton.textContent =
       isRecording
         ? "Stop [Space]"
@@ -681,6 +880,7 @@ function updateEventRecordUi() {
   if (eventRecordPlayButton) {
     eventRecordPlayButton.disabled =
       !megaSynth ||
+      recordingBlocked() ||
       isRecording ||
       commandCount === 0;
     eventRecordPlayButton.textContent =
@@ -695,6 +895,7 @@ function updateEventRecordUi() {
       isRecording ||
       commandCount === 0;
   }
+  if(eventRecordImportInput)eventRecordImportInput.disabled=recordingBlocked()||isRecording;
 
   if (eventRecordStateRoot) {
     if (isRecording) {
@@ -784,7 +985,10 @@ function handleLooperStateChange(
 }
 
 async function toggleEventRecordSession() {
+  if(recordingBlocked())return;
+  const epoch=recordingEpoch;
   await ensureAudioReady();
+  if(!recordingOperationCurrent(epoch))return;
 
   if (!megaSynth) {
     return;
@@ -800,11 +1004,13 @@ async function toggleEventRecordSession() {
       "Stopping looper..."
     );
     await looper.stop();
+    if(!recordingOperationCurrent(epoch))return;
     stopAllNotes();
   }
 
   if (eventRecordSessionActive) {
     if (megaSynth.isRecording()) {
+      stopAllNotes();
       const recording =
         megaSynth.stopRecord();
       if (
@@ -836,7 +1042,10 @@ async function toggleEventRecordSession() {
 }
 
 async function toggleEventTakeRecording() {
+  if(recordingBlocked())return;
+  const epoch=recordingEpoch;
   await ensureAudioReady();
+  if(!recordingOperationCurrent(epoch))return;
 
   if (
     !megaSynth ||
@@ -849,6 +1058,7 @@ async function toggleEventTakeRecording() {
   }
 
   if (megaSynth.isRecording()) {
+    stopAllNotes();
     const recording =
       megaSynth.stopRecord();
     if (
@@ -866,6 +1076,7 @@ async function toggleEventTakeRecording() {
     return;
   }
 
+  stopAllNotes();applyPatchToVoices();
   megaSynth.startRecord();
   updateEventRecordUi();
   setStatus(
@@ -874,7 +1085,10 @@ async function toggleEventTakeRecording() {
 }
 
 async function playEventRecording() {
+  if(recordingBlocked())return;
+  const epoch=recordingEpoch;
   await ensureAudioReady();
+  if(!recordingOperationCurrent(epoch))return;
 
   if (!megaSynth) {
     return;
@@ -949,6 +1163,8 @@ function exportEventRecording() {
 async function importEventRecording(
   event
 ) {
+  if(recordingBlocked()||megaSynth?.isRecording())return;
+  const epoch=recordingEpoch;
   const [file] =
     event.target.files || [];
 
@@ -958,13 +1174,16 @@ async function importEventRecording(
 
   try {
     await ensureAudioReady();
+    if(!recordingOperationCurrent(epoch))return;
     const text =
       await file.text();
+    if(!recordingOperationCurrent(epoch))return;
     const recording =
       JSON.parse(text);
     megaSynth?.importRecording(
       recording
     );
+    megaSynth?.stopRecordingPlayback();
     updateEventRecordUi();
     setStatus(
       `Imported event recording: ${file.name}.`
@@ -1252,6 +1471,14 @@ function updateKeyboardAvailability() {
     "aria-hidden",
     String(!isInitializing)
   );
+  const channel = isSongChannelTarget();
+  const enabled = isPerformanceInputEnabled();
+  keyboard.dataset.songAudition = !channel ? 'off' : songAuditionVoice ? 'ready' : 'unavailable';
+  keyboard.setAttribute('aria-disabled', String(!enabled));
+  keyboard.setAttribute('aria-label', channel
+    ? `CH${songTargetState.target + 1} keyboard${songAuditionVoice ? ' audition' : ' unavailable; pause the song to audition an FM channel'}`
+    : 'Synth keyboard');
+  keyboard.classList.toggle('is-song-unavailable', !enabled);
 }
 
 function rebuildFretboardLayout() {
@@ -1382,11 +1609,15 @@ function applyPatchToVoices() {
 }
 
 function syncControlsFromState() {
+  const preset = songLiveView?.snapshot.channels[songLiveView.channel].preset;
+  const common = preset ? {...preset, lfoEnabled:preset.lfo.enabled, lfoFrequency:preset.lfo.frequency,
+    dacEnabled:songLiveView.snapshot.dacEnabled} : commonState;
+  const operators = preset?.operators ?? operatorStates;
   for (const config of COMMON_PARAM_DEFS) {
     commonControls
       .get(config.id)
       ?.updateVisual(
-        commonState[config.id]
+        common[config.id]
       );
   }
 
@@ -1398,7 +1629,7 @@ function syncControlsFromState() {
       rowControls
         ?.get(config.id)
         ?.updateVisual(
-          operatorStates[operator][
+          operators[operator][
             config.id
           ]
         );
@@ -1410,6 +1641,7 @@ function syncControlsFromState() {
       currentPresetName;
   }
 
+  syncOperatorGates();
   syncChannel3SpecialControls();
 }
 
@@ -1450,6 +1682,12 @@ function applyPresetData(preset, presetName) {
   importedTfiName = presetName.startsWith('vfs:') ? presetName.split('/').pop() : '';
   currentPresetPan = {...(preset.pan ?? {left:true, right:true})};
   currentPresetB4 = preset.b4 ?? 0xc0;
+  const hadPerformanceVoice=Boolean(currentPerformanceVoice);
+  currentPerformanceVoice=preset.capturedVoice?structuredClone(preset.capturedVoice):null;
+  if(currentPerformanceVoice) {
+    channel3SpecialState.enabled=currentPerformanceVoice.specialMode;
+    if(currentPerformanceVoice.specialMode)channel3SpecialState.frequencies=structuredClone(currentPerformanceVoice.specialFrequencies);
+  } else if(hadPerformanceVoice)channel3SpecialState.enabled=false;
   commonState.algorithm =
     preset.algorithm ?? 7;
   commonState.feedback =
@@ -1486,6 +1724,8 @@ function applyPresetData(preset, presetName) {
   if (synth) {
     applyPatchToVoices();
   }
+  updateLooperUi();
+  updateEventRecordUi();
 }
 
 function buildCurrentPresetState() {
@@ -1506,6 +1746,9 @@ function buildCurrentPresetState() {
     },
     operators: {},
   };
+  if(currentPerformanceVoice)preset.capturedVoice={keyMask:currentPerformanceVoice.keyMask,
+    specialMode:channel3SpecialState.enabled,
+    specialFrequencies:channel3SpecialState.enabled?structuredClone(channel3SpecialState.frequencies):[]};
 
   for (const operator of OPERATOR_NUMBERS) {
     // TFI's preset encoder uses logical operator labels 1..4.
@@ -1533,6 +1776,7 @@ function buildLooperPatchSnapshot() {
     dacEnabled:
       commonState.dacEnabled,
     pan: {...currentPresetPan},
+    capturedVoice:getCurrentPerformanceVoice()?structuredClone(getCurrentPerformanceVoice()):null,
     operators: [
       {
         ...operatorStates[1],
@@ -1554,52 +1798,7 @@ function applyLooperPatchToChannel(
   patch,
   channel
 ) {
-  if (!loopSynth || !patch) {
-    return;
-  }
-
-  loopSynth.setLfo(
-    patch.lfoEnabled ?? false,
-    patch.lfoFrequency ?? 0
-  );
-  loopSynth.setDacEnabled(
-    patch.dacEnabled ?? false
-  );
-
-  for (const operator of OPERATOR_NUMBERS) {
-    const operatorPatch =
-      patch.operators?.[operator - 1];
-
-    if (!operatorPatch) {
-      continue;
-    }
-
-    loopSynth.setOperator(
-      channel,
-      displayOperatorToApiOperator(
-        operator
-      ),
-      {
-        ...operatorPatch,
-        am:
-          operatorPatch.am === true,
-      }
-    );
-  }
-
-  loopSynth.setAlgo(
-    channel,
-    patch.algorithm ?? 7,
-    patch.feedback ?? 0
-  );
-
-  loopSynth.setPan(
-    channel,
-    patch.pan?.left ?? true,
-    patch.pan?.right ?? true,
-    patch.ams ?? 0,
-    patch.pms ?? 0
-  );
+  applySynthLooperPatch(loopSynth,patch,channel);
 }
 
 function createTfiExportName() {
@@ -1623,10 +1822,9 @@ function renderAlgorithmDiagram() {
     return;
   }
 
-  const algorithm =
-    commonState.algorithm;
-  const feedback =
-    commonState.feedback;
+  const view = songLiveView?.snapshot.channels[songLiveView.channel].preset ?? commonState;
+  const algorithm = view.algorithm;
+  const feedback = view.feedback;
   const description =
     ALGORITHM_DESCRIPTIONS[
       algorithm
@@ -1654,6 +1852,17 @@ function renderChannel3SpecialMonitor() {
     !channel3SpecialMonitor ||
     !channel3SpecialModePill
   ) {
+    return;
+  }
+
+  if (songLiveView) {
+    channel3SpecialModePill.textContent = songLiveView.snapshot.channels[2].specialMode ? 'Special On' : 'Special Off';
+    syncChannel3SpecialControls();
+    return;
+  }
+  if(currentPerformanceVoice||channel3SpecialState.enabled||megaSynth?.isRecordingPlaybackActive()) {
+    channel3SpecialModePill.textContent=channel3SpecialState.enabled?'Special On':'Special Off';
+    syncChannel3SpecialControls();
     return;
   }
 
@@ -1698,10 +1907,13 @@ function renderChannel3SpecialMonitor() {
 }
 
 function syncChannel3SpecialControls() {
+  const live = songLiveView?.snapshot.channels[2];
+  const enabled = live ? live.specialMode : channel3SpecialState.enabled;
+  const frequencies = live ? live.specialFrequencies : channel3SpecialState.frequencies;
   channel3SpecialControls
     .get("enabled")
     ?.updateVisual(
-      channel3SpecialState.enabled
+      enabled
     );
 
   for (
@@ -1710,8 +1922,7 @@ function syncChannel3SpecialControls() {
     operator += 1
   ) {
     const frequency =
-      channel3SpecialState
-        .frequencies[operator];
+      frequencies[operator];
     channel3SpecialControls
       .get(`op${operator}-block`)
       ?.updateVisual(
@@ -1746,6 +1957,13 @@ function buildChannel3SpecialControls() {
       value:
         channel3SpecialState.enabled,
       onChange: (nextValue) => {
+        if (songLiveView) return;
+        if(nextValue&&!channel3SpecialState.frequencies[3].fnum) {
+          syncChannel3SpecialControls();
+          setStatus('Set an OP4 base frequency above zero before enabling CH3 keyboard mode.');
+          return;
+        }
+        stopAllNotes();
         channel3SpecialState.enabled =
           Boolean(nextValue);
         if (synth) {
@@ -1754,6 +1972,7 @@ function buildChannel3SpecialControls() {
           );
         }
         renderChannel3SpecialMonitor();
+        if(currentPerformanceVoice){markPresetEdited();updateLooperUi();updateEventRecordUi();}
       },
     });
   channel3SpecialControls.set(
@@ -1781,6 +2000,7 @@ function buildChannel3SpecialControls() {
             .frequencies[operator]
             .block,
         onChange: (nextValue) => {
+          if (songLiveView) return;
           channel3SpecialState
             .frequencies[operator]
             .block = nextValue;
@@ -1807,6 +2027,7 @@ function buildChannel3SpecialControls() {
             }
           }
           renderChannel3SpecialMonitor();
+          if(currentPerformanceVoice)markPresetEdited();
         },
       });
     channel3SpecialControls.set(
@@ -1826,6 +2047,12 @@ function buildChannel3SpecialControls() {
             .frequencies[operator]
             .fnum,
         onChange: (nextValue) => {
+          if (songLiveView) return;
+          if(channel3SpecialState.enabled&&operator===3&&!nextValue) {
+            syncChannel3SpecialControls();
+            setStatus('CH3 keyboard transposition needs an OP4 base frequency above zero.');
+            return;
+          }
           channel3SpecialState
             .frequencies[operator]
             .fnum = nextValue;
@@ -1852,6 +2079,7 @@ function buildChannel3SpecialControls() {
             }
           }
           renderChannel3SpecialMonitor();
+          if(currentPerformanceVoice)markPresetEdited();
         },
       });
     channel3SpecialControls.set(
@@ -1925,6 +2153,7 @@ function buildCommonControls() {
     gapPx: 4,
     onHelpToggle: toggleParamHelp,
     onChange: (id, nextValue) => {
+      if (songLiveView) return;
       commonState[id] = nextValue;
       if (id !== 'dacEnabled') markPresetEdited();
       renderAlgorithmDiagram();
@@ -1961,6 +2190,9 @@ function buildOperatorControls() {
     defs: OPERATOR_PARAM_DEFS,
     operatorStates,
     controlsMap: operatorControls,
+    gateControls: operatorGateControls,
+    getOperatorEnabled: operator => Boolean((currentPerformanceVoice?.keyMask ?? 15) & (1 << (operator - 1))),
+    onOperatorGateChange: setOperatorGate,
     onChange: (
       operator,
       id,
@@ -1971,9 +2203,40 @@ function buildOperatorControls() {
   });
 }
 
+function syncOperatorGates() {
+  // During Live observation show the actual current key bits, including all
+  // Off between notes. lastKeyMask is only useful for copying/auditioning.
+  const mask = songLiveView
+    ? songLiveView.snapshot.channels[songLiveView.channel].keyMask
+    : currentPerformanceVoice?.keyMask ?? 15;
+  for (const [operator, button] of operatorGateControls) {
+    const pressed = String(Boolean(mask & (1 << (operator - 1))));
+    if (button.getAttribute('aria-pressed') !== pressed) button.setAttribute('aria-pressed', pressed);
+    button.disabled = Boolean(songLiveView);
+  }
+}
+
+function setOperatorGate(operator, enabled) {
+  if (songLiveView) return;
+  const voice = getCurrentPerformanceVoice() ?? {keyMask:15, specialMode:false, specialFrequencies:[]};
+  const bit = 1 << (operator - 1);
+  const keyMask = enabled ? voice.keyMask | bit : voice.keyMask & ~bit;
+  if (keyMask === voice.keyMask) return;
+  // The optional sidecar field also describes authored OP selections. Keeping
+  // its existing name preserves saved copied instruments and old Cassettes.
+  currentPerformanceVoice = {...voice, keyMask};
+  syncOperatorGates();
+  markPresetEdited();
+  if (!isSongChannelTarget()) {
+    const target = getPlayableSynth();
+    for (const held of voices) if (held.held) target?.setKeyMask(held.channel);
+  }
+}
+
 // Numeric and graphical edits share persistence and update only this operator.
 // Do not reset envelopes, re-key held notes, or rewrite channel frequencies.
 function applyOperatorParams(operator, patch) {
+  if (songLiveView) return;
   Object.assign(operatorStates[operator], patch);
   for (const [id, value] of Object.entries(patch)) operatorControls.get(operator)?.get(id)?.updateVisual(value);
   markPresetEdited();
@@ -2064,6 +2327,9 @@ function renderFretboardUi() {
 }
 
 function stopAllNotes() {
+  if(looper?.recording)for(const voice of voices)if(voice.held)looper.noteOff(voice.channel);
+  songAuditionVoice?.noteOff(songAuditionVoice.channel);
+  if (songAuditionBus) songAuditionBus.gain.value = 0;
   stopAllRuntimeNotes({
     synth,
     voices,
@@ -2078,11 +2344,18 @@ function stopAllNotes() {
 }
 
 function getPlayableSynth() {
+  if (isSongChannelTarget()) return songAuditionVoice;
   if (looper?.running) {
     return looper;
   }
 
-  return synth;
+  return getEditorPlayableSynth();
+}
+
+// OP gates and CH3 pitch ratios share the keyboard and recording path.
+// The existing parameter controls still program the chip directly.
+function getEditorPlayableSynth() {
+  return synth?editorPerformanceTarget:null;
 }
 
 async function ensureLooper() {
@@ -2093,12 +2366,12 @@ async function ensureLooper() {
   }
 
   if (!looper) {
-    looper = new MegaSynthLooper({
+    looper = new SynthLooper({
       synth: loopMegaSynth,
       now: () =>
         audioContext.currentTime,
-      liveTarget: synth,
-      playbackTarget: loopSynth,
+      liveTarget: editorPerformanceTarget,
+      playbackTarget: loopPerformanceTarget,
       getPatch:
         buildLooperPatchSnapshot,
       applyPatch: (
@@ -2128,11 +2401,14 @@ async function ensureLooper() {
 }
 
 async function toggleLooperStart() {
+  if(recordingBlocked())return;
+  const epoch=recordingEpoch;
   if (
     !looper?.running &&
     eventRecordSessionActive
   ) {
     if (megaSynth?.isRecording()) {
+      stopAllNotes();
       megaSynth.stopRecord();
     }
     if (
@@ -2146,6 +2422,7 @@ async function toggleLooperStart() {
 
   const currentLooper =
     await ensureLooper();
+  if(!recordingOperationCurrent(epoch))return;
 
   if (!currentLooper) {
     return;
@@ -2164,6 +2441,7 @@ async function toggleLooperStart() {
   }
 
   await currentLooper.start();
+  if(!recordingOperationCurrent(epoch)){await currentLooper.stop();return;}
   updateLooperUi();
   updateEventRecordUi();
   setStatus(
@@ -2172,8 +2450,11 @@ async function toggleLooperStart() {
 }
 
 async function toggleLooperRecord() {
+  if(recordingBlocked())return;
+  const epoch=recordingEpoch;
   const currentLooper =
     await ensureLooper();
+  if(!recordingOperationCurrent(epoch))return;
 
   if (!currentLooper) {
     return;
@@ -2188,6 +2469,7 @@ async function toggleLooperRecord() {
 
   const wasRecording =
     currentLooper.recording;
+  if(wasRecording)stopAllNotes();
   const pendingToggle =
     currentLooper.toggleRecord();
   updateLooperUi();
@@ -2198,6 +2480,7 @@ async function toggleLooperRecord() {
   );
   const completedUnit =
     await pendingToggle;
+  if(!recordingOperationCurrent(epoch))return;
   updateLooperUi();
 
   if (wasRecording) {
@@ -2260,6 +2543,10 @@ function clearLooper() {
 }
 
 function togglePrimaryRecordAction() {
+  if(recordingBlocked()) {
+    setStatus('Pause or Stop the VGM and choose Synth to record your instrument.');
+    return;
+  }
   if (eventRecordSessionActive) {
     void toggleEventTakeRecording();
     return;
@@ -2295,6 +2582,8 @@ async function initializeDirectAudio() {
 
   megaSynth = runtime.megaSynth;
   synth = runtime.synth;
+  megaSynth.recordingManager=new SynthRecordingManager({synth,now:()=>audioContext.currentTime,
+    onPlaybackStopped:restoreEditorAfterEventPlayback});
   applyMasterVolume();
   setupLooperCaptureTap();
   loopOutputBus =
@@ -2318,12 +2607,12 @@ async function initializeDirectAudio() {
   loopSynth =
     loopRuntime.synth;
   applyMasterVolume();
-  looper = new MegaSynthLooper({
+  looper = new SynthLooper({
     synth: loopMegaSynth,
     now: () =>
       audioContext.currentTime,
-    liveTarget: synth,
-    playbackTarget: loopSynth,
+    liveTarget: editorPerformanceTarget,
+    playbackTarget: loopPerformanceTarget,
     getPatch:
       buildLooperPatchSnapshot,
     applyPatch: (
@@ -2353,7 +2642,7 @@ async function initializeDirectAudio() {
       appendOutputEnvelopePoints,
   });
   megaSynth.setOutputEnvelopeOptions({enabled: visualMode === 'envelope'});
-  outputVisualizer.connect(audioContext, [liveOutputBus, loopOutputBus]);
+  outputVisualizer.connect(audioContext, [finalOutputBus]);
 
   applyPatchToVoices();
   stopAllNotes();
@@ -2611,11 +2900,12 @@ inputController =
     getAudioReadyPromise:
       () => audioReadyPromise,
     getPitchBend: () => pitchBendSemitones,
-    isInputEnabled: () => !switchingAudioOutput,
+    isInputEnabled: isPerformanceInputEnabled,
     getSynth: () =>
       getPlayableSynth(),
     ensureAudioReady,
-    chooseVoice,
+    chooseVoice: available => songAuditionVoice ? available[songAuditionVoice.channel]
+      : channel3SpecialState.enabled?available[2]:chooseVoice(available),
     updateKeyboardVisuals,
     setStatus,
     stopAllNotes,
@@ -2656,6 +2946,27 @@ buildCommonControls();
 buildOperatorHeader();
 buildOperatorControls();
 buildChannel3SpecialControls();
+// Resolve value nodes once. Live updates read the already-decoded snapshot;
+// they do not query the DOM, scan text, or measure layout to find differences.
+const highlightBindings=[];
+const bindHighlight=(control,read)=>{
+  const element=control?.element.querySelector('.param-value');
+  if(element)highlightBindings.push({element,read});
+};
+for(const {id} of COMMON_PARAM_DEFS)bindHighlight(commonControls.get(id),view=>{
+  if(id==='lfoEnabled')return view.snapshot.lfo.enabled;
+  if(id==='lfoFrequency')return view.snapshot.lfo.frequency;
+  if(id==='dacEnabled')return view.snapshot.dacEnabled;
+  return view.snapshot.channels[view.channel].preset[id];
+});
+for(const operator of OPERATOR_NUMBERS)for(const {id} of OPERATOR_PARAM_DEFS) {
+  bindHighlight(operatorControls.get(operator)?.get(id),view=>view.snapshot.channels[view.channel].preset.operators[operator][id]);
+}
+bindHighlight(channel3SpecialControls.get('enabled'),view=>view.snapshot.channels[2].specialMode);
+for(let operator=0;operator<4;operator++)for(const field of ['block','fnum']) {
+  bindHighlight(channel3SpecialControls.get(`op${operator}-${field}`),view=>view.snapshot.channels[2].specialFrequencies[operator][field]);
+}
+liveHighlighter=createSynthLiveHighlighter({controls:highlightBindings,enabled:songHighlightToggle.checked});
 buildPresetSelect();
 buildTfiExporter();
 buildVgiExporter();
@@ -2731,8 +3042,48 @@ synthFiles = setupSynthFiles({
     updateTfiSummary();
   },
   onListChanged:syncFilePresetOptions,
+  onWorkspaceReplaced:()=>songControls?.reset(),
+  isObserving:()=>Boolean(songLiveView),
   stopAllNotes,
   setStatus,
+});
+songControls = setupSynthSongControls({
+  project:synthProject,
+  getAudio:async()=>{
+    await ensureAudioReady();
+    await referenceRecordingStop;
+    return {context:audioContext, output:finalOutputBus};
+  },
+  beforeResume:stopRecordingForReference,
+  getVolume:()=>masterVolume,
+  onFileSelected:path=>synthFiles.selectFile(path),
+  onLiveView:setSongLiveView,
+  onTargetState:setSongTargetState,
+  async onCopyToSynth(preset,name) {
+    const copied = await synthFiles.createFromPreset(preset,name);
+    // Copy auditions an FM instrument. OP metadata on an ordinary saved tone
+    // must not otherwise change the chip-wide DAC switch when it is opened.
+    if (copied) {
+      commonState.dacEnabled = false;
+      synth?.setDacEnabled(false);
+      loopSynth?.setDacEnabled(false);
+      syncControlsFromState();
+    }
+    return copied;
+  },
+  onStatus:setStatus,
+});
+window.addEventListener('pagehide',event=>{
+  void stopRecordingForReference();
+  if(event.persisted)songControls.stop();
+  else {
+    songControls.dispose();
+    liveHighlighter.dispose();
+    ++songAuditionGeneration;
+    if (songAuditionBus) songAuditionBus.gain.value = 0;
+    void songAuditionMegaSynth?.close();
+    songAuditionBus?.disconnect();
+  }
 });
 updateKeyboardAvailability();
 updateMasterVolumeUi();
@@ -2744,17 +3095,16 @@ if (window.__TAURI_INTERNALS__) {
     value: Object.freeze({
       setSwitching(value) {
         switchingAudioOutput = value === true;
+        if(switchingAudioOutput)++recordingEpoch;
+        updateKeyboardAvailability();updateLooperUi();updateEventRecordUi();
       },
       async ensureReady() {
         await ensureAudioReady();
         return {context: audioContext, output: finalOutputBus};
       },
       async stopPlayback() {
-        if (megaSynth?.isRecording()) megaSynth.stopRecord();
-        megaSynth?.stopRecordingPlayback();
-        eventRecordSessionActive = false;
-        if (looper?.running) await looper.stop();
-        stopLooperAudioPlayback();
+        songControls?.stop();
+        await stopRecordingForReference();
         stopAllNotes();
         // Key-off alone can leave a long release tail playing after switching.
         synth?.reset();

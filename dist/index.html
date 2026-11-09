@@ -146,7 +146,77 @@
       #synthFileSaveButton[data-feedback="success"] { background: #2f765a; color: #fff; border-color: #245f47; }
       .synth-sync-announcement { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
       .synth-editor[aria-busy="true"] .param-control { opacity: .6; }
-      .synth-file-format-note { color: #a8bfba; font-size: .7rem; margin: 0 0 10px; }
+      .synth-file-format-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 10px; }
+      .synth-file-format-note { color: #a8bfba; font-size: .7rem; margin: 0; flex: 1 1 auto; min-width: 0; }
+      .synth-file-format-row .volume-control { flex: none; margin-left: auto; }
+      .synth-song-player { display: flex; flex: 1 1 320px; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; font-size: .7rem; }
+      .synth-song-player[hidden] { display: none; }
+      .synth-song-player > label { color: #b8cac6; font-weight: 800; letter-spacing: .04em; }
+      #synthSongSelect { flex: 1 1 120px; width: 180px; min-width: 0; max-width: 300px; font: inherit; color: #e4eee8; border: 1px solid #41615b; border-radius: 999px; padding: 4px 8px; background: #1b2929; }
+      .synth-song-player .toolbar-button { min-height: 26px; padding: 3px 9px; font-size: inherit; }
+      #synthSongPlayButton { min-width: 64px; }
+      #synthSongTime { color: #a8bfba; font-variant-numeric: tabular-nums; white-space: nowrap; }
+      #synthSongSeek {
+        flex: 1 1 90px; min-width: 64px; max-width: 140px; height: 6px; margin: 7px 0;
+        appearance: none; -webkit-appearance: none; cursor: ew-resize;
+        border: 1px solid #586965; border-radius: 999px;
+        background: linear-gradient(to right, #7bcfc1 0%, #7bcfc1 var(--seek-position, 0%), #33413f var(--seek-position, 0%), #33413f 100%);
+      }
+      #synthSongSeek::-webkit-slider-runnable-track { height: 6px; background: transparent; border: 0; }
+      #synthSongSeek::-webkit-slider-thumb {
+        appearance: none; -webkit-appearance: none; width: 13px; height: 13px; margin-top: -3.5px;
+        border: 1px solid #d5e5dc; border-radius: 50%; background: #7bcfc1;
+      }
+      #synthSongSeek::-moz-range-track { height: 6px; background: transparent; border: 0; }
+      #synthSongSeek::-moz-range-thumb { width: 13px; height: 13px; border: 1px solid #d5e5dc; border-radius: 50%; background: #7bcfc1; }
+      #synthSongSeek:focus-visible { outline: 2px solid #b7d9d1; outline-offset: 4px; }
+      #synthSongSeek:disabled { opacity: .4; cursor: default; }
+      #synthSongStatus { color: #a8bfba; min-width: 0; overflow-wrap: anywhere; }
+      #synthSongStatus[data-state="error"] { color: #ffbdad; flex-basis: 100%; }
+      .synth-song-live-controls { display: inline-flex; flex-wrap: wrap; max-width: 100%; align-items: center; gap: 5px; }
+      .synth-song-live-controls label { display: inline-flex; align-items: center; gap: 4px; color: #b8cac6; }
+      .synth-song-live-controls input { margin: 0; }
+      #synthSongChannelSelect { font: inherit; border: 1px solid #41615b; border-radius: 999px; color: #e4eee8; background: #1b2929; padding: 4px 6px; }
+      #synthSongLiveStatus { color: #8bd9ca; font-size: .65rem; overflow-wrap: anywhere; }
+      #synthSongMixPanel { position: fixed; z-index: 100; box-sizing: border-box; overflow: auto; padding: 12px; background: #172423; color: #e4eee8; border: 1px solid #7c9d91; border-radius: 12px; box-shadow: 0 8px 30px #0008; font-size: .75rem; }
+      #synthSongMixPanel[hidden] { display: none; }
+      .synth-song-mix-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+      #synthSongMixChannels fieldset { min-width: 0; margin: 8px 0 0; padding: 6px; border: 1px solid #35504b; border-radius: 8px; display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 4px 8px; }
+      #synthSongMixChannels legend { color: #a8bfba; padding: 0 4px; }
+      .synth-song-mix-channel { display: flex; align-items: center; gap: 4px; }
+      .synth-song-mix-channel > span { flex: 1; min-width: 0; }
+      .synth-song-mix-channel.is-muted > span { opacity: .45; }
+      .synth-song-mix-channel .toolbar-button { padding: 2px 5px; min-height: 24px; }
+      .synth-song-mix-channel .is-selected { background: #47776b; color: #fff; }
+      .synth-song-mix-volume { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; margin: 2px 0 5px; }
+      .synth-song-mix-volume input {
+        --mix-volume-color: #7cadd8;
+        flex: 1; min-width: 0; height: 6px; margin: 7px 0;
+        appearance: none; -webkit-appearance: none;
+        border: 1px solid #586965; border-radius: 999px;
+        background: linear-gradient(to right, var(--mix-volume-color) 0%, var(--mix-volume-color) var(--mix-volume-position, 26.3158%), #33413f var(--mix-volume-position, 26.3158%), #33413f 100%);
+        cursor: ew-resize;
+      }
+      .synth-song-mix-volume input[data-boosted="true"] { --mix-volume-color: #e8953d; }
+      .synth-song-mix-volume input::-webkit-slider-runnable-track { height: 6px; background: transparent; border: 0; }
+      .synth-song-mix-volume input::-webkit-slider-thumb {
+        appearance: none; -webkit-appearance: none; width: 13px; height: 13px; margin-top: -3.5px;
+        border: 1px solid #d5e5dc; border-radius: 50%; background: var(--mix-volume-color);
+      }
+      .synth-song-mix-volume input::-moz-range-track { height: 6px; background: transparent; border: 0; }
+      .synth-song-mix-volume input::-moz-range-thumb {
+        width: 13px; height: 13px; border: 1px solid #d5e5dc; border-radius: 50%; background: var(--mix-volume-color);
+      }
+      .synth-song-mix-volume input:focus-visible { outline: 2px solid #b7d9d1; outline-offset: 4px; }
+      .synth-song-mix-volume input[data-boosted="true"] + output { color: #e8953d; }
+      .synth-song-mix-volume output { min-width: 3.2em; text-align: right; font-variant-numeric: tabular-nums; }
+      .synth-song-display-option { display: flex; align-items: center; gap: 6px; margin: 7px 0; color: #b8cac6; }
+      .synth-song-display-option input { margin: 0; accent-color: #7be0d6; }
+      @keyframes synth-live-change { from { background-color: #ffdb9788; color: #fff5c3; } }
+      .param-value.is-live-changed { animation: synth-live-change 420ms ease-out; }
+      @media (prefers-reduced-motion: reduce) { .param-value.is-live-changed { animation-duration: 1ms; } }
+      .synth-editor[data-live-view="true"] .param-value, .synth-editor[data-live-view="true"] .param-button { cursor: default; }
+      .synth-editor[data-live-view="true"] .operator-envelope-handle { visibility: hidden; }
       .synth-file-dialog { max-width: min(430px, calc(100vw - 32px)); box-sizing: border-box; padding: 20px; color: #e4eee8; background: #172423; border: 1px solid #7c9d91; border-radius: 14px; }
       .synth-file-dialog::backdrop { background: #0009; }
       .synth-file-dialog h2 { margin-bottom: 12px; }
@@ -229,14 +299,6 @@
 
       .toolbar-check input {
         margin: 0;
-      }
-
-      .volume-row {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        flex-wrap: wrap;
-        margin: 0 0 6px;
       }
 
       .volume-control {
@@ -655,6 +717,26 @@
         text-shadow: 0 1px 0 #171f20;
       }
 
+      .operator-gate {
+        padding: 3px 0;
+        min-height: 22px;
+        width: 100%;
+        font-family: inherit;
+        background: #263c3c;
+        border: 1px solid currentColor;
+        border-radius: 5px;
+        cursor: pointer;
+      }
+
+      .operator-gate[aria-pressed="false"] {
+        background: transparent;
+        border-style: dashed;
+        opacity: .48;
+      }
+
+      .operator-gate:focus-visible { outline: 2px solid #dce8cd; outline-offset: 2px; }
+      .operator-gate:disabled { cursor: default; }
+
       .param-strip {
         display: flex;
         gap: 6px;
@@ -852,7 +934,7 @@
         accent-color: #7be0d6; cursor: ns-resize;
       }
 
-      .keyboard.is-loading {
+      .keyboard.is-loading, .keyboard.is-song-unavailable {
         opacity: 0.38;
         pointer-events: none;
         filter: saturate(0.75);
@@ -1293,7 +1375,40 @@
                 <span id="synthSyncAnnouncement" class="synth-sync-announcement" role="status" aria-live="polite" aria-atomic="true"></span>
               </div>
             </div>
-            <p class="synth-file-format-note" title="TFI stores FM operators, algorithm and feedback. VGI also stores pan, AMS and PMS. Extra Synth settings are stored beside the tone as &lt;tone&gt;.synth.json and included in Cassette export. DAC and CH3 special mode remain session controls.">TFI / VGI + Synth settings · Format info ⓘ</p>
+            <div class="synth-file-format-row">
+              <p class="synth-file-format-note" title="TFI stores FM operators, algorithm and feedback. VGI also stores pan, AMS and PMS. Extra Synth settings are stored beside the tone as &lt;tone&gt;.synth.json and included in Cassette export. Copied OP masks and CH3 pitch ratios require this sidecar; DAC remains a session control.">TFI / VGI + Synth settings · Format info ⓘ</p>
+              <div id="synthSongPlayer" class="synth-song-player" aria-label="Original VGM reference performance" hidden>
+                <label for="synthSongSelect" title="Play the original VGM without replacing the instrument you are editing.">VGM</label>
+                <select id="synthSongSelect" aria-label="Reference VGM"></select>
+                <button id="synthSongPlayButton" class="toolbar-button" type="button" disabled>Play</button>
+                <button id="synthSongStopButton" class="toolbar-button" type="button" disabled>Stop</button>
+                <input id="synthSongSeek" type="range" min="0" max="0" step="any" value="0" aria-label="Reference playback position in seconds" disabled>
+                <output id="synthSongTime" aria-label="Reference playback time">0:00 / 0:00</output>
+                <span id="synthSongStatus" role="status">Stopped.</span>
+                <span class="synth-song-live-controls">
+                  <label title="Automatically follow the song settings. Turn off to freeze the current view. Choose Synth to edit your instrument."><input id="synthSongLiveToggle" type="checkbox" checked>Live</label>
+                  <select id="synthSongChannelSelect" aria-label="View and keyboard sound" title="Synth: edit and play your sound. CH1–CH6: view that song channel; Pause to play its sound on the keyboard.">
+                    <option value="synth">Synth</option>
+                    <option value="0" selected>CH1</option><option value="1">CH2</option><option value="2">CH3</option>
+                    <option value="3">CH4</option><option value="4">CH5</option><option value="5">CH6</option>
+                  </select>
+                  <button id="synthSongCopyButton" class="toolbar-button" type="button" aria-label="Copy selected channel to Synth" title="Pause to copy the selected FM channel into a new editable Synth instrument." disabled>Copy</button>
+                  <button id="synthSongMixButton" class="toolbar-button" type="button" aria-expanded="false" aria-controls="synthSongMixPanel" title="Adjust reference-song chip volumes and mute individual channels. Changes take about 0.2 seconds.">Mix</button>
+                </span>
+                <output id="synthSongLiveStatus">Play, then Pause to play this CH · Synth to edit</output>
+                <div id="synthSongMixPanel" role="group" aria-label="Reference playback mixer" hidden>
+                  <div class="synth-song-mix-heading"><strong>Playback mixer</strong><button id="synthSongMixReset" class="toolbar-button" type="button" title="Restore shared System levels and unmute channels.">Reset</button></div>
+                  <label class="synth-song-display-option" title="Briefly highlight changed Live values. Turn off to reduce visual updates."><input id="synthSongHighlightToggle" type="checkbox" checked>Live highlight</label>
+                  <label class="synth-song-display-option"><input id="synthSongSeekCacheToggle" type="checkbox" checked>Seek cache</label>
+                  <div id="synthSongMixChannels">Play a VGM to show its channels.</div>
+                </div>
+              </div>
+              <label class="volume-control" for="masterVolumeRange">
+                <span>Vol</span>
+                <input id="masterVolumeRange" type="range" min="0" max="380" value="100" step="1" aria-label="Master volume, 0 to 380 percent">
+                <span id="masterVolumeValue" class="volume-readout">100%</span>
+              </label>
+            </div>
         <div class="layout">
           <section class="controls-stack">
             <div class="card visual-card">
@@ -1357,7 +1472,7 @@
                   <div class="param-strip" id="commonControls"></div>
                 </div>
                 <div class="operator-header-row">
-                <div class="operator-header-spacer operator-corner-label">OP</div>
+                <div class="operator-header-spacer operator-corner-label" title="Click OP1–OP4 to select Key On / Off. Off releases that operator using RR.">OP</div>
                   <div class="operator-header-strip" id="operatorHeader"></div>
                 </div>
                 <div id="operatorControls" class="operator-stack"></div>
@@ -1390,13 +1505,6 @@
                 Ignore Op
               </label>
               <div id="eventRecordState" class="looper-state">Event: none</div>
-            </div>
-            <div class="volume-row">
-              <label class="volume-control" for="masterVolumeRange">
-                <span>Vol</span>
-                <input id="masterVolumeRange" type="range" min="0" max="200" value="100" step="1" aria-label="Master volume, 0 to 200 percent">
-                <span id="masterVolumeValue" class="volume-readout">100%</span>
-              </label>
             </div>
             <div class="status" id="status">Press any key or click a pad to start audio.</div>
 
@@ -1463,7 +1571,7 @@
     </div>
 
     <script type="module">
-      import "./synth.js?v=synth-master-200-1";
+      import "./synth.js?v=synth-song-seek-1";
     </script>
   </body>
 </html>

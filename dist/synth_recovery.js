@@ -1,4 +1,4 @@
-import {createSynthProject,isSynthTonePath,synthStatePath} from './synth_project.js';
+import {createSynthProject,isSynthTonePath,synthStatePath} from './synth_project.js?v=op-gates-1';
 import {CHECKPOINT_ROOT} from './js/tetorica_virtual_files/filesystem.js';
 import {resolvePath} from './js/tetorica_virtual_files/path.js';
 
