@@ -123,7 +123,7 @@
       .synth-workspace.has-files { grid-template-columns: 250px minmax(0, 1fr); }
       .synth-editor { min-width: 0; }
       .synth-files-panel { min-width: 0; border: 1px solid #41615b; border-radius: 14px; padding: 12px; background: #172423; }
-      .synth-files-panel[hidden] { display: none; }
+      .synth-files-panel[hidden], .synth-file-editor-heading[hidden] { display: none; }
       .synth-files-heading, .synth-file-editor-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
       .synth-files-heading h2 { margin: 0; letter-spacing: .15em; font-size: .8rem; }
       .synth-files-actions { display: flex; flex-wrap: wrap; gap: 5px; padding-top: 10px; }
@@ -339,6 +339,60 @@
         gap: 10px;
       }
 
+      .synth-chip-tabs { display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid var(--line); padding: 0 2px 6px; }
+      .synth-chip-tabs .toolbar-button { min-width: 68px; min-height: 28px; border-radius: 8px 8px 0 0; margin-bottom: -7px; }
+      .synth-chip-tabs [aria-selected="true"] { color: #7be0d6; }
+      .synth-chip-panel { display: grid; gap: 10px; min-width: 0; }
+      .synth-chip-panel[hidden] { display: none; }
+      .synth-chip-panel.synth-chip-placeholder { min-height: 230px; align-content: center; justify-items: center; text-align: center; border-style: dashed; }
+      .synth-chip-placeholder::before { content: ""; width: 120px; height: 6px; margin-bottom: 10px; background: repeating-linear-gradient(-45deg, #dfaf60 0 8px, #263331 8px 16px); }
+      .synth-chip-placeholder h2 { margin: 0; font-size: 1rem; color: #dfaf60; }
+      .synth-chip-placeholder p { margin: 0; font-size: .8rem; }
+      .synth-chip-placeholder .subtext { color: #a8bfba; font-size: .7rem; }
+      .synth-psg-canvas { display: block; width: 100%; height: 160px; border-radius: 6px; background: #10191a; }
+      .synth-psg-description { margin: 4px 0 6px; color: #a8bfba; font-size: .68rem; }
+      .synth-psg-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+      .synth-psg-heading h2 { margin: 0; font-size: .85rem; }
+      .synth-psg-session { margin: 3px 0 0; color: #a8bfba; font-size: .65rem; }
+      .synth-psg-row { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; margin-top: 8px; }
+      .synth-psg-label { flex: 0 0 78px; color: #b8cac6; font-size: .68rem; }
+      .synth-psg-options { display: flex; flex: 1; flex-wrap: wrap; gap: 4px; }
+      .synth-psg-options [aria-pressed="true"] { color: #7be0d6; border-color: #6c9b8e; background: #29413d; }
+      .synth-psg-number.param-control.no-label { grid-template-columns: 26px 32px 26px; gap: 0; min-width: 0; padding: 0 2px; }
+      .synth-psg-number .param-button { width: 26px; height: 26px; }
+      .synth-psg-number button:disabled { opacity: .3; cursor: default; }
+      .synth-psg-number .param-value { min-width: 32px; min-height: 26px; font-size: .78rem; font-variant-numeric: tabular-nums; touch-action: none; }
+      .synth-psg-scale { color: #a8bfba; font-size: .65rem; }
+      .synth-psg-noise[hidden] { display: none; }
+      .synth-psg-envelope { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+      .synth-psg-envelope-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      .synth-psg-envelope-heading h3 { margin: 0; font-size: .76rem; }
+      .synth-psg-envelope-heading [aria-pressed="true"] { color: #7be0d6; border-color: #6c9b8e; background: #29413d; }
+      .synth-psg-envelope-caption { margin: 4px 0 0; color: #c3af98; font-size: .65rem; line-height: 1.5; }
+      .synth-psg-envelope-controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); gap: 8px; margin-top: 8px; }
+      .synth-psg-envelope-controls[hidden] { display: none; }
+      .synth-psg-envelope-field { display: grid; gap: 4px; min-width: 0; }
+      .synth-psg-envelope-field > span { color: #b8cac6; font-size: .65rem; }
+      .synth-psg-envelope-number.param-control.no-label { grid-template-columns: 26px minmax(32px, 1fr) 26px; gap: 0; min-width: 0; padding: 0 2px; }
+      .synth-psg-envelope-number .param-button { width: 26px; height: 26px; }
+      .synth-psg-envelope-number .param-value { min-width: 32px; min-height: 26px; font-size: .78rem; font-variant-numeric: tabular-nums; touch-action: none; }
+      .synth-psg-hint { margin: 10px 0 0; color: #a8bfba; font-size: .68rem; line-height: 1.5; }
+      .synth-pcm-fields { display: grid; grid-template-columns: repeat(auto-fit,minmax(135px,1fr)); gap: 8px; margin-top: 10px; }
+      .synth-pcm-field { display: grid; gap: 4px; min-width: 0; font-size: .65rem; color: #b8cac6; }
+      .synth-pcm-number.param-control.no-label { grid-template-columns: 26px minmax(45px,1fr) 26px; min-width: 0; gap: 0; padding: 0 2px; }
+      .synth-pcm-number .param-button { width: 26px; height: 26px; }
+      .synth-pcm-number .param-value { min-width: 45px; min-height: 26px; font-size: .78rem; touch-action: none; font-variant-numeric: tabular-nums; }
+      #synthPcmCanvas { touch-action: none; }
+      #synthPcmLoadStatus { color: #dfbd90; overflow-wrap: anywhere; font-size: .68rem; }
+      .synth-pcm-field[hidden] { display: none; }
+      .synth-pcm-step { text-align: center; padding: 6px; border: 1.5px solid var(--pill-border); border-radius: 999px; font-weight: 800; color: var(--ink); font-variant-numeric: tabular-nums; }
+      .synth-psg-help { position: relative; font-size: .7rem; }
+      .synth-psg-help summary { display: grid; place-items: center; width: 24px; height: 24px; border: 1px solid var(--pill-border); border-radius: 50%; cursor: pointer; list-style: none; }
+      .synth-psg-help summary::-webkit-details-marker { display: none; }
+      .synth-psg-help-body { position: absolute; z-index: 20; top: 29px; right: 0; width: min(280px, calc(100vw - 70px)); padding: 10px; border: 1px solid #6c9b8e; border-radius: 8px; background: #172423; box-shadow: 0 6px 20px #0006; }
+      .synth-psg-help-body p { margin: 0 0 7px; line-height: 1.5; }
+      .synth-psg-help-body p:last-child { margin-bottom: 0; }
+
       .control-section,
       .card {
         padding: 11px;
@@ -409,7 +463,8 @@
         cursor: pointer;
       }
 
-      .toolbar-button.is-selected {
+      .toolbar-button.is-selected,
+      .synth-chip-tabs [aria-selected="true"] {
         background: linear-gradient(180deg, #284e4a, #1d3836);
         border-color: #69cec0;
         box-shadow: inset 0 0 0 1px rgba(105, 206, 192, 0.26);
@@ -922,6 +977,18 @@
       }
 
       .performance-keyboard { display: flex; gap: 10px; align-items: stretch; }
+      #synthKeyboardPanel[hidden], #synthCodePanel[hidden] { display:none; }
+      .synth-input-tabs { margin-bottom:10px; }
+      .synth-code-toolbar { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-bottom:8px; }
+      .synth-code-toolbar .synth-code-state { margin-left:auto; color:#b3c9c3; font-size:.7rem; }
+      .synth-code-editor-wrap { position:relative; min-width:0; border:1px solid #41615b; border-radius:12px; overflow:hidden; background:#111b1c; }
+      #synthCodeEditor { display:block; width:100%; min-height:280px; height:320px; resize:vertical; padding:14px; border:0; border-radius:0; box-sizing:border-box; color:#dcebe5; background:#111b1c; font:13px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace; tab-size:2; }
+      #synthCodeEditorHost { height:320px; min-width:0; }
+      #synthCodeEditorHost:not([data-ready="true"]) { display:none; }
+      .synth-code-note { color:#9ab6ad; font-size:.66rem; line-height:1.5; margin:6px 0; }
+      .synth-code-log { white-space:pre-wrap; overflow-wrap:anywhere; max-height:130px; overflow:auto; margin:8px 0 0; padding:8px 10px; border:1px solid #2e4943; border-radius:8px; color:#b9d3c8; background:#101818; font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; }
+      .synth-code-log:empty { display:none; }
+      #synthCodeError { color:#ffc0aa; }
       .modulation-control {
         display: flex; flex-direction: column; align-items: center; gap: 8px;
         width: 44px; flex-shrink: 0; padding: 8px 2px;
@@ -1315,8 +1382,8 @@
                   <section class="synth-menu-section">
                     <h2>Import</h2>
                     <div class="synth-menu-actions">
-                      <button id="importPresetButton" class="toolbar-button" type="button" data-close-synth-menu>VGM / VGZ / S98 / TFI / VGI…</button>
-                      <input id="tfiFile" type="file" multiple accept=".vgm,.vgz,.s98,.tfi,.vgi,application/octet-stream" hidden>
+                      <button id="importPresetButton" class="toolbar-button" type="button" data-close-synth-menu>VGM / VGZ / S98 / TFI / VGI / PSG / PCM JSON…</button>
+                      <input id="tfiFile" type="file" multiple accept=".vgm,.vgz,.s98,.tfi,.vgi,.psg.json,.pcm.json,.js,.mjs,application/octet-stream,application/json,text/javascript" hidden>
                       <button id="importCassetteButton" class="toolbar-button" type="button" data-close-synth-menu>Cassette…</button>
                       <input id="cassetteImportInput" type="file" accept=".zip,application/zip" hidden>
                       <button id="importEventRecordingButton" class="toolbar-button" type="button" data-close-synth-menu>Event recording…</button>
@@ -1328,6 +1395,8 @@
                     <div class="synth-menu-actions">
                       <button id="exportTfiButton" class="toolbar-button" type="button" data-close-synth-menu>Instrument · TFI</button>
                       <button id="exportVgiButton" class="toolbar-button" type="button" data-close-synth-menu>Instrument · VGI</button>
+                      <button id="exportPsgButton" class="toolbar-button" type="button" data-close-synth-menu hidden>Instrument · PSG JSON</button>
+                      <button id="exportPcmButton" class="toolbar-button" type="button" data-close-synth-menu hidden>Instrument · PCM JSON</button>
                       <button id="exportCassetteButton" class="toolbar-button" type="button" data-close-synth-menu>Cassette · ZIP</button>
                       <button id="eventRecordExportButton" class="toolbar-button" type="button" data-close-synth-menu disabled>Event recording · JSON</button>
                     </div>
@@ -1354,7 +1423,7 @@
         </div>
         <div id="synthWorkspace" class="synth-workspace">
           <aside id="synthFilesPanel" class="synth-files-panel" aria-label="Cassette files" hidden>
-            <div class="synth-files-heading"><h2>FILES</h2><button id="synthFileNewButton" class="toolbar-button" type="button">＋ Instrument</button></div>
+            <div class="synth-files-heading"><h2>FILES</h2><button id="synthFileNewButton" class="toolbar-button" type="button">＋ Instrument</button><button id="synthFileNewCodeButton" class="toolbar-button" type="button">＋ JS</button></div>
             <p id="synthCassetteName">cassette.cassette.zip</p>
             <div id="synthFilesTree"></div>
             <div class="synth-files-actions">
@@ -1364,9 +1433,11 @@
               <button id="synthFileNewFolderButton" class="toolbar-button" type="button">New folder…</button>
               <button id="synthFileUndoButton" class="toolbar-button" type="button" title="Undo the last file operation" disabled>Undo files</button>
             </div>
-            <p id="synthFileSelectionInfo" class="synth-files-caption">Choose an instrument file to edit. Other files stay in the Cassette.</p>
+            <p id="synthFileSelectionInfo" class="synth-files-caption">Choose an instrument or JavaScript file to edit. Other files stay in the Cassette.</p>
           </aside>
           <div class="synth-editor">
+            <p id="presetImportError" class="preset-import-error" role="alert" hidden></p>
+            <p id="presetImportNotice" class="tfi-summary" role="status" hidden></p>
             <div class="synth-file-editor-heading">
               <span id="synthActiveFilePath">Built-in instrument</span><span id="synthFileDirty"></span>
               <div class="synth-file-sync-actions" role="toolbar" aria-label="Instrument file controls">
@@ -1411,6 +1482,13 @@
             </div>
         <div class="layout">
           <section class="controls-stack">
+            <div class="synth-chip-tabs" role="tablist" aria-label="Sound chip editor">
+              <button id="synthChipTabYm2612" class="toolbar-button is-selected" type="button" role="tab" data-synth-chip="ym2612" aria-selected="true" aria-controls="synthChipYm2612" tabindex="0">YM2612</button>
+              <button id="synthChipTabPsg" class="toolbar-button" type="button" role="tab" data-synth-chip="psg" aria-selected="false" aria-controls="synthChipPsg" tabindex="-1">PSG</button>
+              <button id="synthChipTabPcm" class="toolbar-button" type="button" role="tab" data-synth-chip="pcm" aria-selected="false" aria-controls="synthChipPcm" tabindex="-1">PCM</button>
+              <button id="synthChipTabPwm" class="toolbar-button" type="button" role="tab" data-synth-chip="pwm" aria-selected="false" aria-controls="synthChipPwm" tabindex="-1">PWM</button>
+            </div>
+            <div id="synthChipYm2612" class="synth-chip-panel" role="tabpanel" aria-labelledby="synthChipTabYm2612">
             <div class="card visual-card">
               <div class="visual-mode-controls" role="group" aria-label="Audio visualization">
                 <button type="button" class="toolbar-button is-selected" data-visual-mode="envelope" aria-pressed="true">Envelope</button>
@@ -1460,8 +1538,6 @@
                 <select id="presetSelect"></select>
                 <div id="tfiSummary" class="tfi-summary">Drop VGM / VGZ / S98 / TFI / VGI anywhere to load.</div>
               </div>
-              <p id="presetImportError" class="preset-import-error" role="alert" hidden></p>
-              <p id="presetImportNotice" class="tfi-summary" role="status" hidden></p>
               <div class="operator-stack">
                 <div class="operator-header-row">
                 <div class="operator-header-spacer"></div>
@@ -1489,6 +1565,125 @@
                 <p id="paramHelpText" class="param-help-text"></p>
               </div>
             </div>
+            </div>
+            <div id="synthChipPsg" class="synth-chip-panel" role="tabpanel" aria-labelledby="synthChipTabPsg" hidden>
+              <div class="card visual-card">
+                <div class="visual-mode-controls" role="group" aria-label="PSG audio visualization">
+                  <button type="button" class="toolbar-button is-selected" data-psg-visual-mode="waveform" aria-pressed="true">Waveform</button>
+                  <button type="button" class="toolbar-button" data-psg-visual-mode="spectrum" aria-pressed="false">Spectrum</button>
+                </div>
+                <p id="synthPsgVisualizerDescription" class="synth-psg-description">Final output waveform · after volume.</p>
+                <canvas id="synthPsgCanvas" class="synth-psg-canvas" width="720" height="160" role="img" aria-label="Final output waveform"></canvas>
+              </div>
+              <div id="synthPsgSettings" class="control-section">
+                <div class="preset-row">
+                  <label for="synthPsgPresetSelect">Preset</label>
+                  <select id="synthPsgPresetSelect"><option value="psg-default">PSG default</option></select>
+                </div>
+                <div class="synth-psg-heading">
+                  <div><h2>Sega PSG</h2><p class="synth-psg-session">PSG instrument · JSON / Files / Cassette</p></div>
+                  <details id="synthPsgHelp" class="synth-psg-help">
+                    <summary aria-label="About Sega PSG controls" title="About Sega PSG controls">?</summary>
+                    <div class="synth-psg-help-body">
+                      <p>Three hardware tone channels play fixed 50% duty square waves. New notes rotate through them. PSG has no hardware ADSR. Low notes clamp at the 10-bit tone-period limit.</p>
+                      <p>Attenuation changes in 2 dB steps: 0 is loudest, 15 is silent. Master volume is shared with the other editors.</p>
+                      <p>Noise has one channel. Clock / 512, / 1024 and / 2048 use fixed clocks; keys retrigger the noise without changing its pitch. Tone 3 links its clock to the keyboard and Pitch. The Tone 3 square-wave output stays silent.</p>
+                      <p>Software Envelope is an added software feature, not a hardware PSG envelope. It moves each voice's real attenuation in 2 dB steps. Attack, Decay and Release are milliseconds; Sustain is a level percentage. ADSR edits apply to new notes. Changing On / Off stops held notes and release tails.</p>
+                    </div>
+                  </details>
+                </div>
+                <div class="synth-psg-row">
+                  <span class="synth-psg-label">Source</span>
+                  <div class="synth-psg-options" role="group" aria-label="PSG sound source">
+                    <button type="button" class="toolbar-button" data-psg-source="tone" aria-pressed="true">Tone</button>
+                    <button type="button" class="toolbar-button" data-psg-source="noise" aria-pressed="false">Noise</button>
+                  </div>
+                </div>
+                <div class="synth-psg-row">
+                  <span class="synth-psg-label">Attenuation</span>
+                  <div id="synthPsgAttenuationControl"></div>
+                  <span class="synth-psg-scale">0 loudest · 15 silent</span>
+                </div>
+                <div id="synthPsgNoiseControls" class="synth-psg-noise" hidden>
+                  <div class="synth-psg-row">
+                    <span class="synth-psg-label">Noise type</span>
+                    <div class="synth-psg-options" role="group" aria-label="PSG noise type">
+                      <button type="button" class="toolbar-button" data-psg-noise-type="white" aria-pressed="true">White</button>
+                      <button type="button" class="toolbar-button" data-psg-noise-type="periodic" aria-pressed="false">Periodic</button>
+                    </div>
+                  </div>
+                  <div class="synth-psg-row">
+                    <span class="synth-psg-label">Noise clock</span>
+                    <div class="synth-psg-options" role="group" aria-label="PSG noise clock">
+                      <button type="button" class="toolbar-button" data-psg-noise-rate="low" aria-pressed="false">Clock / 512</button>
+                      <button type="button" class="toolbar-button" data-psg-noise-rate="medium" aria-pressed="true">Clock / 1024</button>
+                      <button type="button" class="toolbar-button" data-psg-noise-rate="high" aria-pressed="false">Clock / 2048</button>
+                      <button type="button" class="toolbar-button" data-psg-noise-rate="tone3" aria-pressed="false">Tone 3</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="synth-psg-envelope" aria-labelledby="synthPsgEnvelopeTitle">
+                  <div class="synth-psg-envelope-heading">
+                    <h3 id="synthPsgEnvelopeTitle">Software Envelope</h3>
+                    <button id="synthPsgEnvelopeEnabled" type="button" class="toolbar-button" aria-label="Enable software envelope" aria-pressed="false" aria-expanded="false" aria-controls="synthPsgEnvelopeControls">Off</button>
+                  </div>
+                  <p class="synth-psg-envelope-caption">Software control · not a hardware PSG envelope</p>
+                  <div id="synthPsgEnvelopeControls" class="synth-psg-envelope-controls" hidden>
+                    <div class="synth-psg-envelope-field"><span>Attack · ms</span><div id="synthPsgEnvelopeAttackControl"></div></div>
+                    <div class="synth-psg-envelope-field"><span>Decay · ms</span><div id="synthPsgEnvelopeDecayControl"></div></div>
+                    <div class="synth-psg-envelope-field"><span>Sustain · %</span><div id="synthPsgEnvelopeSustainControl"></div></div>
+                    <div class="synth-psg-envelope-field"><span>Release · ms</span><div id="synthPsgEnvelopeReleaseControl"></div></div>
+                  </div>
+                </div>
+                <p id="synthPsgHint" class="synth-psg-hint">Tone · 3 hardware channels · round robin.</p>
+              </div>
+            </div>
+            <div id="synthChipPcm" class="synth-chip-panel" role="tabpanel" aria-labelledby="synthChipTabPcm" hidden>
+              <div class="card visual-card">
+                <div class="visual-mode-controls" role="group" aria-label="PCM visualization">
+                  <button type="button" class="toolbar-button is-selected" data-pcm-visual-mode="sample" aria-pressed="true">Sample</button>
+                  <button type="button" class="toolbar-button" data-pcm-visual-mode="waveform" aria-pressed="false">Waveform</button>
+                  <button type="button" class="toolbar-button" data-pcm-visual-mode="spectrum" aria-pressed="false">Spectrum</button>
+                </div>
+                <p id="synthPcmVisualizerDescription" class="synth-psg-description">Sample view · drag L / E to set loop start / end.</p>
+                <canvas id="synthPcmCanvas" class="synth-psg-canvas" width="720" height="160" role="img" aria-label="PCM sample and loop range"></canvas>
+              </div>
+              <div id="synthPcmSettings" class="control-section">
+                <div class="preset-row"><label for="synthPcmPresetSelect">Preset</label><select id="synthPcmPresetSelect"><option value="pcm-sine">PCM default</option></select></div>
+                <div class="synth-psg-heading">
+                  <div><h2>Mega CD PCM</h2><p class="synth-psg-session">RF5C164 · 8 voices · shared 64 KiB RAM</p></div>
+                  <details id="synthPcmHelp" class="synth-psg-help"><summary aria-label="About Mega CD PCM" title="About Mega CD PCM">?</summary><div class="synth-psg-help-body">
+                    <p>In Synth mode, eight PCM voices share one sample in 64 KiB RAM. Volume is 8-bit; left and right Pan each have 16 levels. New keys use round robin.</p>
+                    <p>Software release smoothing lowers only the released voice's Volume over 4 ms before stopping it. This is a Synth software feature, shared by keyboard audition, Event Rec and Looper; the RF5C164 has no hardware ADSR envelope. Held voices keep their original sound. Stop and sample changes stop voices immediately.</p>
+                    <p>WAV decoding, mono mixing and 8-bit conversion are software operations. Long samples are resampled to fit RAM, preserving duration with reduced bandwidth. Guard bytes reserve safe loop / stop markers.</p>
+                    <p>Root note plays at the original sample speed. Loop Start and End can change while notes are held. End moves a marker in shared RAM without restarting the voices. Changing the sample stops held notes. Loop Off plays once and then loops silence; extending End can expose more audio to a held voice.</p>
+                    <p>VGM Live shows the selected PCM channel's written settings and sample RAM at the audible position. Pause to play that sample on the selected channel; Copy creates a new Synth instrument. C4 is the captured playback speed, not an inferred original note. A snapshot cannot preserve later RAM edits or a game's software envelope.</p>
+                    <p>Wrapped samples, unknown RAM or unsafe end markers cannot be copied or auditioned.</p>
+                    <p>Software Event Rec records notes, Pitch, PCM settings and sample changes into self-contained JSON. Start Event Rec, then use Record / Stop or Space. Stopping a take starts loop playback on a separate PCM chip. Use current sound captures your current sample and settings when playback starts; later edits do not change that playback. Original note and stop timing is retained. Export / import takes from Menu.</p>
+                    <p>Software Looper adds independent recorded layers. Start Looper, then Record / Stop or Space; the first take sets the period. Later takes join at their recorded position. Each layer keeps its samples and settings when you edit the Synth. Undo removes the latest layer; Stop / Start keeps layers, while Clear removes them. Up to 16 layers / 120 seconds / 128 MiB of rendered audio stay in this session's memory; they are not saved in Cassette. Layer mixing is software, beyond one chip's eight voices.</p>
+                  </div></details>
+                </div>
+                <div class="synth-psg-row" role="group" aria-label="PCM sample source">
+                  <button type="button" class="toolbar-button" data-pcm-builtin="sine">Sine</button><button type="button" class="toolbar-button" data-pcm-builtin="triangle">Triangle</button><button type="button" class="toolbar-button" data-pcm-builtin="saw">Saw</button><button type="button" class="toolbar-button" data-pcm-builtin="square">Square</button>
+                  <button id="synthPcmLoadButton" type="button" class="toolbar-button">Load WAV…</button><input id="synthPcmAudioFile" type="file" accept=".wav,audio/wav,audio/x-wav" hidden>
+                </div>
+                <p id="synthPcmSampleInfo" class="synth-psg-hint"></p>
+                <p id="synthPcmLoadStatus" role="status" hidden></p>
+                <div class="synth-pcm-fields">
+                  <div class="synth-pcm-field"><span>Volume · 0–255</span><div id="synthPcmVolumeControl"></div></div>
+                  <div class="synth-pcm-field"><span>Pan left · 0–15</span><div id="synthPcmPanLeftControl"></div></div>
+                  <div class="synth-pcm-field"><span>Pan right · 0–15</span><div id="synthPcmPanRightControl"></div></div>
+                  <div id="synthPcmRootField" class="synth-pcm-field"><span>Root note · <span id="synthPcmRootName">C4</span></span><div id="synthPcmRootNoteControl"></div></div>
+                  <div id="synthPcmStepField" class="synth-pcm-field" hidden><span>Playback step · hardware</span><output id="synthPcmStep" class="synth-pcm-step">0</output></div>
+                </div>
+                <div class="synth-psg-row"><span class="synth-psg-label">Loop</span><button id="synthPcmLoopEnabled" type="button" class="toolbar-button" aria-pressed="true">On</button></div>
+                <div class="synth-pcm-fields"><div class="synth-pcm-field"><span id="synthPcmLoopStartLabel">Loop Start · frame</span><div id="synthPcmLoopStartControl"></div></div><div class="synth-pcm-field"><span id="synthPcmLoopEndLabel">Loop End · exclusive frame</span><div id="synthPcmLoopEndControl"></div></div></div>
+              </div>
+            </div>
+            <div id="synthChipPwm" class="card synth-chip-panel synth-chip-placeholder" role="tabpanel" aria-labelledby="synthChipTabPwm" tabindex="0" hidden>
+              <h2>32X PWM</h2><p>Under construction</p>
+              <p class="subtext">Editor preview · Keyboard plays YM2612.</p>
+            </div>
             <div class="looper-row">
               <button id="looperStartButton" class="toolbar-button" type="button">Looper Start</button>
               <button id="looperRecordButton" class="toolbar-button" type="button" hidden>Record</button>
@@ -1502,13 +1697,18 @@
               <button id="eventRecordPlayButton" class="toolbar-button" type="button" disabled>Play</button>
               <label class="toolbar-check" for="eventRecordIgnoreOperators">
                 <input id="eventRecordIgnoreOperators" type="checkbox" checked>
-                Ignore Op
+                <span id="eventRecordPatchLabel">Ignore Op</span>
               </label>
               <div id="eventRecordState" class="looper-state">Event: none</div>
             </div>
             <div class="status" id="status">Press any key or click a pad to start audio.</div>
 
-            <div class="control-section">
+            <div class="control-section" id="synthInputSection">
+              <div class="synth-chip-tabs synth-input-tabs" role="tablist" aria-label="Performance input">
+                <button id="synthInputKeyboardTab" class="toolbar-button" type="button" role="tab" aria-selected="true" aria-controls="synthKeyboardPanel">Keyboard</button>
+                <button id="synthInputCodeTab" class="toolbar-button" type="button" role="tab" aria-selected="false" aria-controls="synthCodePanel" tabindex="-1">Code</button>
+              </div>
+              <div id="synthKeyboardPanel" role="tabpanel" aria-labelledby="synthInputKeyboardTab">
               <div class="fretboard-toolbar">
                 <div class="fretboard-row fretboard-summary">
                   <div class="octave-control" role="group" aria-label="Keyboard octave" title="Transpose new notes by octaves. Changing octave releases held notes.">
@@ -1548,6 +1748,22 @@
                 </div>
               </div>
               </div>
+              </div>
+              <div id="synthCodePanel" role="tabpanel" aria-labelledby="synthInputCodeTab" hidden>
+                <div class="synth-code-toolbar">
+                  <button id="synthCodeRunButton" class="toolbar-button" type="button" title="Run a new code session (Ctrl/Cmd+Enter)">Run</button>
+                  <button id="synthCodeApplyButton" class="toolbar-button" type="button" title="Apply edits while keeping context and named live resources" disabled>Apply</button>
+                  <button id="synthCodeStopButton" class="toolbar-button" type="button" title="Stop code loops, waits, effects and notes" disabled>Stop</button>
+                  <span id="synthCodeState" class="synth-code-state" role="status">Idle</span>
+                </div>
+                <div class="synth-code-editor-wrap">
+                  <textarea id="synthCodeEditor" aria-label="JavaScript performance code" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+                  <div id="synthCodeEditorHost" aria-label="JavaScript performance code editor"></div>
+                </div>
+                <p id="synthCodeEditorNote" class="synth-code-note">Run starts a new session. Apply keeps context. Stop clears the live session. Code is saved with the Cassette.</p>
+                <pre id="synthCodeError" class="synth-code-log" role="alert"></pre>
+                <pre id="synthCodeLog" class="synth-code-log" aria-label="Code output"></pre>
+              </div>
             </div>
           </section>
 
@@ -1567,11 +1783,12 @@
       <button class="toolbar-button" type="button" role="menuitem" data-file-action="rename">Rename…</button>
       <button class="toolbar-button" type="button" role="menuitem" data-file-action="delete">Delete</button>
       <button class="toolbar-button" type="button" role="menuitem" data-file-action="new">New instrument…</button>
+      <button class="toolbar-button" type="button" role="menuitem" data-file-action="code">New JavaScript file…</button>
       <button class="toolbar-button" type="button" role="menuitem" data-file-action="folder">New folder…</button>
     </div>
 
     <script type="module">
-      import "./synth.js?v=synth-song-seek-1";
+      import "./synth.js?v=synth-code-2";
     </script>
   </body>
 </html>

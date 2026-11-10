@@ -12,11 +12,19 @@ import {
 import { parseTfi, createTfiFromPreset } from './js/tfi.js';
 import { parseVgi, createVgiFromPreset } from './js/vgi.js';
 import { readPresetImport } from './synth_preset_import.js?v=vgm-storage-1';
+import {isPsgPreset,isPsgPresetPath,normalizePsgPreset,parsePsgPreset,serializePsgPreset} from './synth_psg_preset.js?v=psg-envelope-1';
+export {isPsgPresetPath} from './synth_psg_preset.js?v=psg-envelope-1';
+import {isPcmPreset,isPcmPresetPath,normalizePcmPreset,parsePcmPreset,serializePcmPreset} from './synth_pcm.js?v=pcm-editor-1';
+export {isPcmPresetPath} from './synth_pcm.js?v=pcm-editor-1';
 
-const TONE_EXTENSION = /\.(tfi|vgi)$/i;
+const TONE_EXTENSION = /\.(tfi|vgi|psg\.json|pcm\.json)$/i;
 const METADATA_PATHS = new Set(['/metadata.json', '/cassette.metadata.js']);
 const comparePaths = (a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
 const SYNTH_STATE_KIND = 'tetorica-fm2612-synth';
+const jsonKind=path=>isPcmPresetPath(path)?'pcm':isPsgPresetPath(path)?'psg':null;
+const isJsonTonePath=path=>jsonKind(path)!==null;
+const parseJsonTone=(path,data)=>isPcmPresetPath(path)?parsePcmPreset(data):parsePsgPreset(data);
+const serializeJsonTone=(path,preset)=>isPcmPresetPath(path)?serializePcmPreset(preset):serializePsgPreset(preset);
 
 export const synthStatePath = path => resolvePath(path) + '.synth.json';
 export const isSynthStatePath = path => /\.(?:tfi|vgi)\.synth\.json$/i.test(String(path));
@@ -72,7 +80,12 @@ function mergeState(preset,state) {
 }
 function validateToneStates(files) {
   const entries=new Map(files.map(file=>[resolvePath(file.path),file]));
-  for(const [path,file] of entries)if(isSynthTonePath(path)){
+  for(const [path,file] of entries){
+    // PSG / PCM are complete JSON documents. Their optional checkpoint is the same
+    // format, never an FM sidecar, and must also validate before replacement.
+    const logical=isCheckpointPath(path)?path.slice(CHECKPOINT_ROOT.length):path;
+    if(isSynthTonePath(logical)&&isJsonTonePath(logical)){parseJsonTone(logical,file.data);continue;}
+    if(!isSynthTonePath(path))continue;
     const bytes=file.data;
     const format=bytes.byteLength===43?'vgi':'tfi';
     if(format==='vgi')parseVgi(bytes);else parseTfi(bytes);
@@ -87,6 +100,11 @@ export function isSynthTonePath(path) {
   // happens to end in an instrument extension.
   return !path.split('/').includes('.git') && !isCheckpointPath(path) && TONE_EXTENSION.test(path);
 }
+export const isPsgTonePath=path=>isSynthTonePath(path)&&isPsgPresetPath(path);
+export const isPcmTonePath=path=>isSynthTonePath(path)&&isPcmPresetPath(path);
+
+/** Includes compound JSON extensions so file-tree suffixes keep their type. */
+export const synthToneExtension=path=>String(path).match(TONE_EXTENSION)?.[0]??null;
 
 function safeName(name, fallback = 'tone') {
   return String(name).replace(/[\\/\x00-\x1f:*?"<>|]/g, '_')
@@ -142,7 +160,7 @@ export function createSynthProject({ snapshot: initialSnapshot } = {}) {
     path = resolvePath(path);
     const baseName = path.slice(path.lastIndexOf('/') + 1);
     const extensionAt = baseName.lastIndexOf('.');
-    const extension = extensionAt > 0 ? baseName.slice(extensionAt) : '';
+    const extension = synthToneExtension(baseName)??(extensionAt > 0 ? baseName.slice(extensionAt) : '');
     const stem = extension ? path.slice(0, -extension.length) : path;
     let candidate = path, suffix = 2;
     while (occupied.has(candidate)) candidate = `${stem}-${suffix++}${extension}`;
@@ -150,7 +168,8 @@ export function createSynthProject({ snapshot: initialSnapshot } = {}) {
   }
   function transferTone(path,destination,copy) {
     const pairs=[[path,destination]];
-    if(fs.has(path)&&isSynthTonePath(path)){
+    if(fs.has(path)&&isSynthTonePath(path)&&isSynthTonePath(destination)&&jsonKind(path)!==jsonKind(destination))throw Error('Keep the instrument type when moving an FM, PSG or PCM preset.');
+    if(fs.has(path)&&isSynthTonePath(path)&&!isJsonTonePath(path)){
       const state=synthStatePath(path),target=synthStatePath(destination);
       if(exists(target)||exists(CHECKPOINT_ROOT+target))throw Error(`Synth state destination already exists: ${target}`);
       if(fs.has(state))pairs.push([state,target]);
@@ -186,10 +205,16 @@ export function createSynthProject({ snapshot: initialSnapshot } = {}) {
     uniquePath,
     /** Append an editable copy without replacing an existing tone or sidecar. */
     createTone(preset, name='Captured') {
-      const stem=safeName(String(name).replace(/\.(?:tfi|vgi)$/i,''),'Captured');
+      const psg=isPsgPreset(preset),pcm=isPcmPreset(preset),json=psg||pcm;
+      if(psg)normalizePsgPreset(preset);
+      else if(pcm)normalizePcmPreset(preset);
+      else if(preset?.kind!==undefined)throw Error('Unsupported instrument preset kind');
+      const extension=pcm?'.pcm.json':psg?'.psg.json':'.vgi';
+      const stem=safeName(String(name).replace(TONE_EXTENSION,''),'Captured');
       const occupied=new Set(project.listEntries().map(entry=>entry.path));
-      let path=`/presets/${stem}.vgi`,suffix=2;
-      while([path,synthStatePath(path),CHECKPOINT_ROOT+path,CHECKPOINT_ROOT+synthStatePath(path)].some(candidate=>occupied.has(candidate)))path=`/presets/${stem}-${suffix++}.vgi`;
+      let path=`/presets/${stem}${extension}`,suffix=2;
+      const candidates=()=>json?[path,CHECKPOINT_ROOT+path]:[path,synthStatePath(path),CHECKPOINT_ROOT+path,CHECKPOINT_ROOT+synthStatePath(path)];
+      while(candidates().some(candidate=>occupied.has(candidate)))path=`/presets/${stem}-${suffix++}${extension}`;
       return project.writeTone(path,preset,{overwrite:false});
     },
     /** File-tree metadata without copying binary samples or Git objects. */
@@ -212,7 +237,9 @@ export function createSynthProject({ snapshot: initialSnapshot } = {}) {
       path = resolvePath(path);
       const file = fs.get(path);
       if (!file) throw new Error(`Instrument not found: ${path}`);
-      if (!isSynthTonePath(path)) throw new Error('Choose a TFI or VGI instrument file.');
+      if (!isSynthTonePath(path)) throw new Error('Choose a TFI or VGI instrument file, or a .psg.json / .pcm.json preset.');
+      if(isJsonTonePath(path))return {path,format:jsonKind(path),preset:parseJsonTone(path,file.data),
+        bytes:typeof file.data==='string'?new TextEncoder().encode(file.data):new Uint8Array(file.data)};
       if (file.type !== 'binary') throw new Error('Instrument files must contain binary TFI/VGI data.');
       const bytes = file.data;
       // Historical Synth imports accepted renamed TFI/VGI files by byte size.
@@ -225,9 +252,18 @@ export function createSynthProject({ snapshot: initialSnapshot } = {}) {
     },
     writeTone(path, preset, { format, overwrite = true, expectedRevision, baselinePreset } = {}) {
       path = resolvePath(path);
-      if (!isSynthTonePath(path)) throw new Error('Instrument file names must end in .tfi or .vgi.');
+      if (!isSynthTonePath(path)) throw new Error('Instrument file names must end in .tfi or .vgi, .psg.json or .pcm.json.');
       const previous = fs.get(path);
       if (previous && !overwrite) throw new Error(`Instrument already exists: ${path}`);
+      if(isJsonTonePath(path)){
+        const kind=jsonKind(path);
+        if(format!==undefined&&format!==kind)throw Error(`A .${kind}.json instrument requires ${kind.toUpperCase()} format.`);
+        const text=serializeJsonTone(path,preset);
+        if(previous)project.readTone(path);
+        mutate(()=>{fs.writeFiles([{path,data:text,expectedRevision}]);selectedPath=path;});
+        return project.readTone(path);
+      }
+      if(isPsgPreset(preset)||isPcmPreset(preset)||preset?.kind!==undefined)throw Error('PSG / PCM presets must use their .psg.json / .pcm.json file type.');
       // Preserve the real format of an existing renamed file when saving.
       format ??= previous ? project.readTone(path).format : path.match(TONE_EXTENSION)[1].toLowerCase();
       if (format !== 'tfi' && format !== 'vgi') throw new Error('Instrument format must be tfi or vgi.');
@@ -281,7 +317,9 @@ export function createSynthProject({ snapshot: initialSnapshot } = {}) {
       return project.readTone(path);
     },
     syncTone(path) {
-      const tone=project.readTone(path),sidecar=synthStatePath(tone.path);
+      const tone=project.readTone(path);
+      if(['psg','pcm'].includes(tone.format)){fs.checkpoints.set(tone.path);return project.readTone(tone.path);}
+      const sidecar=synthStatePath(tone.path);
       mutate(()=>{
         if(!fs.has(sidecar))fs.writeText(sidecar,stateText(tone.preset,tone.format));
         fs.checkpoints.setMany([tone.path,sidecar]);
@@ -290,6 +328,13 @@ export function createSynthProject({ snapshot: initialSnapshot } = {}) {
     },
     revertTone(path) {
       path=resolvePath(path);
+      if(isSynthTonePath(path)&&isJsonTonePath(path)){
+        const saved=fs.checkpoints.get(path);
+        if(!saved)throw Error(`Instrument checkpoint not found: ${path}`);
+        parseJsonTone(path,saved.data);
+        fs.writeFiles([{path,data:saved.data}],{checkpointChanges:false});
+        return project.readTone(path);
+      }
       if(!isSynthTonePath(path)||fs.get(path)?.type!=='binary')throw Error('Choose a TFI or VGI instrument file.');
       const sidecar=synthStatePath(path);
       const saved=fs.checkpoints.get(path),savedState=fs.checkpoints.get(sidecar);
@@ -310,7 +355,7 @@ export function createSynthProject({ snapshot: initialSnapshot } = {}) {
     isToneModified(path) {
       path=resolvePath(path);
       if(!isSynthTonePath(path)||!fs.has(path))return false;
-      return fs.checkpoints.isModified(path)||fs.checkpoints.isModified(synthStatePath(path));
+      return fs.checkpoints.isModified(path)||!isJsonTonePath(path)&&fs.checkpoints.isModified(synthStatePath(path));
     },
     /**
      * Valid input files and original VGM/VGZ recordings are appended in one
@@ -334,7 +379,7 @@ export function createSynthProject({ snapshot: initialSnapshot } = {}) {
         const name = String(file.name ?? 'instrument.tfi');
         try {
           const bytes = fileBytes(typeof file.arrayBuffer === 'function' ? await file.arrayBuffer() : file.data);
-          const { entries, source } = await readPresetImport(bytes, name);
+          const { entries, source } = isJsonTonePath(name)?{entries:[{label:name,format:jsonKind(name),preset:parseJsonTone(name,bytes),bytes}],source:null}:await readPresetImport(bytes, name);
           if (source && fs.has('/vgm')) throw new Error('Cannot save the original VGM: /vgm is a file. Rename it or move it before importing.');
           if (entries.length || source) batches.push({ name, entries, source });
           else failures.push(`${name}: no supported FM instrument snapshots were found.`);
@@ -361,7 +406,7 @@ export function createSynthProject({ snapshot: initialSnapshot } = {}) {
           if (!batch.entries.length) notices.add(`${batch.name}: no supported FM instrument snapshots were found. The original VGM was saved.`);
         }
         if (!batch.entries.length) continue;
-        let source = safeName(batch.name.replace(/\.(vgm|vgz|s98|tfi|vgi)$/i, ''), 'instrument');
+        let source = safeName(batch.name.replace(/\.(vgm|vgz|s98|tfi|vgi|psg\.json|pcm\.json)$/i, ''), 'instrument');
         if (source === '.git') source = '.git-instruments';
         const directTone = !batch.source && directory !== undefined && TONE_EXTENSION.test(batch.name);
         const base = `${directory ?? '/presets'}/${source}`.replace(/^\/\//, '/');
@@ -374,10 +419,11 @@ export function createSynthProject({ snapshot: initialSnapshot } = {}) {
         batch.entries.sort((a, b) => comparePaths(a.label, b.label));
         for (const entry of batch.entries) {
           const format = entry.format ?? 'tfi';
-          const filename = safeName(entry.label.replace(TONE_EXTENSION, ''), 'tone') + `.${format}`;
+          const json=['psg','pcm'].includes(format);
+          const filename = safeName(entry.label.replace(TONE_EXTENSION, ''), 'tone') + (json?`.${format}.json`:`.${format}`);
           const path = uniquePath(`${targetDirectory}/${filename}`, occupied);
           occupied.add(path);
-          addedFiles.push({ path, data: fileBytes(entry.bytes ?? createTfiFromPreset(entry.preset)) });
+          addedFiles.push({ path, data:json?new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(entry.bytes):fileBytes(entry.bytes ?? createTfiFromPreset(entry.preset)) });
           tonePaths.push(path);
           if (entry.notice) notices.add(entry.notice);
         }
@@ -393,7 +439,7 @@ export function createSynthProject({ snapshot: initialSnapshot } = {}) {
       if (destination == null) {
         const filename = path.slice(path.lastIndexOf('/') + 1);
         const extensionAt = filename.lastIndexOf('.');
-        const extension = fs.stat(path).type === 'file' && extensionAt > 0 ? filename.slice(extensionAt) : '';
+        const extension = fs.stat(path).type === 'file' ? synthToneExtension(filename)??(extensionAt > 0 ? filename.slice(extensionAt) : '') : '';
         const stem = extension ? path.slice(0, -extension.length) : path;
         destination = uniquePath(`${stem} copy${extension}`);
       } else destination = resolvePath(destination);
@@ -422,13 +468,13 @@ export function createSynthProject({ snapshot: initialSnapshot } = {}) {
       }
       newName = newName.trim();
       if (newName === '.' || newName === '..') throw new Error('Invalid file or folder name.');
-      const originalExtension = fs.has(path) ? path.match(TONE_EXTENSION)?.[0] : null;
+      const originalExtension = fs.has(path) ? synthToneExtension(path) : null;
       if (originalExtension && !newName.includes('.')) newName += originalExtension;
       return project.move(path, `${dirname(path)}/${newName}`);
     },
     delete(path, { recursive = false } = {}) {
       path=resolvePath(path);
-      const sidecar=fs.has(path)&&isSynthTonePath(path)?synthStatePath(path):null;
+      const sidecar=fs.has(path)&&isSynthTonePath(path)&&!isJsonTonePath(path)?synthStatePath(path):null;
       if(sidecar&&fs.listDirectories().includes(sidecar))throw Error(`Synth state path is a folder: ${sidecar}`);
       mutate(()=>{fs.remove(path,{recursive});if(sidecar&&fs.has(sidecar))fs.remove(sidecar);});
     },
@@ -486,7 +532,8 @@ export function createSynthProject({ snapshot: initialSnapshot } = {}) {
       const files = Array.from(cassette.files, ([path, data]) => ({ path: `/${path}`, data }));
       for (const file of files.filter(file => isSynthTonePath(file.path))) {
         try {
-          if (file.data.byteLength === 43) parseVgi(file.data);
+          if(isJsonTonePath(file.path))parseJsonTone(file.path,file.data);
+          else if (file.data.byteLength === 43) parseVgi(file.data);
           else parseTfi(file.data);
         } catch (error) {
           throw new Error(`Invalid instrument ${file.path}: ${error.message}`);

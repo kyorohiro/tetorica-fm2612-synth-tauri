@@ -1,12 +1,20 @@
 import {renderFileTree} from './playground/playground_file_tree.js';
-import {isSynthTonePath, isSynthStatePath} from './synth_project.js?v=op-gates-1';
+import {createSynthProject,isSynthTonePath,isSynthStatePath,isPsgPresetPath,isPcmPresetPath} from './synth_project.js?v=pcm-editor-1';
+import {isPsgPreset} from './synth_psg_preset.js?v=psg-envelope-1';
+import {isPcmPreset} from './synth_pcm.js?v=pcm-editor-1';
 import {isCheckpointPath} from './js/tetorica_virtual_files/filesystem.js';
-import {createToneRecovery, parseToneRecovery} from './synth_recovery.js?v=op-gates-1';
+import {createToneRecovery, parseToneRecovery} from './synth_recovery.js?v=pcm-editor-1';
 
 const basename = path => path.split('/').pop();
 const dirname = path => path.slice(0, path.lastIndexOf('/')) || '/';
 const inside = (path, directory) => path === directory || path?.startsWith(directory + '/');
 const RECOVERY_KEY = 'tetorica-fm2612-synth-pending-tone';
+const kindOfPath=path=>isPcmPresetPath(path)?'pcm':isPsgPresetPath(path)?'psg':'fm';
+const kindOfPreset=preset=>isPcmPreset(preset)?'pcm':isPsgPreset(preset)?'psg':'fm';
+const validKind=kind=>{if(!['fm','psg','pcm'].includes(kind))throw Error('Invalid instrument editor kind');return kind;};
+const extensionForKind=kind=>kind==='pcm'?'.pcm.json':kind==='psg'?'.psg.json':'.vgi';
+const toneExtension=path=>String(path).match(/\.(?:psg|pcm)\.json$|\.(?:tfi|vgi)$/i)?.[0].toLowerCase();
+const isCodePath=path=>/\.m?js$/i.test(String(path))&&!String(path).split('/').includes('.git')&&!isCheckpointPath(path);
 const newWorkspaceId = () => globalThis.crypto?.randomUUID?.() || `synth-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
 // Structured snapshots keep binary files binary; no base64/JSON round trip.
@@ -20,7 +28,8 @@ async function openDraftStore() {
   });
 }
 
-export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, applySnapshot, onSaved, onListChanged, onWorkspaceReplaced, isObserving=()=>false, stopAllNotes, setStatus}) {
+export function setupSynthFiles({project,getPreset,getPresetId,applyPreset,applySnapshot,onSaved,onListChanged,onWorkspaceReplaced,
+  getEditorKind=()=> 'fm',setEditorKind=()=>{},getDefaultPresetId=()=> 'one-op-basic',isObserving=()=>false,stopAllNotes,setStatus}) {
   const byId = id => document.getElementById(id);
   const panel = byId('synthFilesPanel'), tree = byId('synthFilesTree');
   const toggle = byId('synthFilesToggle'), workspace = byId('synthWorkspace');
@@ -33,11 +42,57 @@ export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, a
   let activeTonePath = null, selectedPath = null, dirty = false;
   let busy = true, importGeneration = 0, visibilityTouched = false, draftLoaded = false;
   let basePresetId = getPresetId(), basePreset = structuredClone(getPreset());
+  let editorKind=validKind(getEditorKind());
+  const editorContexts=new Map();
   let draftStore = null, saveTimer = null, restoring = false;
   let renderedFiles = null;
   let syncFeedback = null, syncFeedbackTimer = null;
   let workspaceId = newWorkspaceId(), generation = 0, pendingTone = null;
   let unprotectedChanges = false, recoveryWarningShown = false;
+  let codeControls=null,savedCodeState=null;
+
+  function editorContext() {
+    return {activeTonePath,preset:structuredClone(getPreset()),presetId:getPresetId(),basePresetId,basePreset:structuredClone(basePreset),dirty};
+  }
+  function rememberEditor() {editorContexts.set(editorKind,editorContext());}
+  function savedEditors() {rememberEditor();return Object.fromEntries([...editorContexts].map(([kind,value])=>[kind,structuredClone(value)]));}
+  function validateEditorContext(value,kind) {
+    validKind(kind);
+    if(!value||typeof value!=='object'||typeof value.presetId!=='string'||typeof value.basePresetId!=='string'||typeof value.dirty!=='boolean')throw Error('Invalid saved editor context');
+    for(const preset of [value.preset,value.basePreset]) {
+      if(!preset||kindOfPreset(preset)!==kind)throw Error('Saved instrument belongs to a different editor');
+      createSynthProject().createTone(preset,'Editor validation');
+    }
+    const next=structuredClone(value),path=next.activeTonePath;
+    if(path!==null&&(typeof path!=='string'||!isSynthTonePath(path)||kindOfPath(path)!==kind))throw Error('Invalid saved editor instrument path');
+    if(path&&!project.fs.has(path)) {next.activeTonePath=null;next.presetId='custom';}
+    else if(path)project.readTone(path);
+    if(next.presetId.startsWith('vfs:')&&next.presetId!=='vfs:'+next.activeTonePath)throw Error('Saved editor points at a different instrument');
+    return next;
+  }
+  function activateEditor(kind,restoreSound=true) {
+    validKind(kind);
+    if(kind===editorKind)return;
+    rememberEditor();
+    const saved=editorContexts.has(kind)?validateEditorContext(editorContexts.get(kind),kind):null;
+    editorKind=kind;setEditorKind(kind);
+    activeTonePath=saved?.activeTonePath??null;dirty=saved?.dirty??false;
+    if(saved) {
+      basePresetId=saved.basePresetId;basePreset=structuredClone(saved.basePreset);
+      if(restoreSound)applySnapshot(saved.preset,saved.presetId,{restoreEditor:true});
+    } else setBaseline();
+    selectedPath=activeTonePath||project.selectedPath;
+    if(activeTonePath)reveal(activeTonePath);
+  }
+  function remapEditors(source,destination=null) {
+    for(const value of editorContexts.values()) {
+      if(!inside(value.activeTonePath,source))continue;
+      if(destination) {
+        const old=value.activeTonePath;value.activeTonePath=destination+old.slice(source.length);
+        for(const key of ['presetId','basePresetId'])if(value[key]==='vfs:'+old)value[key]='vfs:'+value.activeTonePath;
+      } else {value.activeTonePath=null;value.presetId='custom';value.dirty=false;}
+    }
+  }
 
   // The full Cassette stays in IndexedDB. Only the edited tone and its original
   // checkpoint go into a small synchronous journal, protecting the last knob
@@ -63,7 +118,7 @@ export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, a
       try {
         const savedWorkspace = workspaceId, savedGeneration = generation, savedPending = pendingTone;
         const transaction = draftStore.transaction('projects', 'readwrite');
-        transaction.objectStore('projects').put({project:project.snapshot(), activeTonePath, filesVisible:!panel.hidden, workspaceId:savedWorkspace, generation:savedGeneration}, 'current');
+        transaction.objectStore('projects').put({project:project.snapshot(),activeTonePath,editorKind,editorContexts:savedEditors(),codeState:codeControls?.captureState?.()??savedCodeState,filesVisible:!panel.hidden,workspaceId:savedWorkspace,generation:savedGeneration},'current');
         transaction.oncomplete = () => {
           if (workspaceId === savedWorkspace && generation === savedGeneration && pendingTone === savedPending) {
             unprotectedChanges = false;
@@ -92,7 +147,7 @@ export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, a
   }
 
   function capture() {
-    return {project:project.snapshot(), activeTonePath, selectedPath, preset:structuredClone(getPreset()), presetId:getPresetId(), basePresetId, basePreset:structuredClone(basePreset), dirty};
+    return {project:project.snapshot(),activeTonePath,selectedPath,preset:structuredClone(getPreset()),presetId:getPresetId(),basePresetId,basePreset:structuredClone(basePreset),dirty,editorKind,editorContexts:savedEditors(),codeState:codeControls?.captureState?.()??savedCodeState};
   }
   function pushUndo(snapshot = capture()) {
     history.push(snapshot);
@@ -119,25 +174,35 @@ export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, a
   }
   function updateButtons() {
     const readOnly = isObserving();
+    const editingCode=Boolean(codeControls?.isCodeMode?.());
     const modified = Boolean(activeTonePath && project.isToneModified(activeTonePath));
     if (syncFeedback && (syncFeedback !== activeTonePath || dirty || modified)) clearSyncFeedback();
-    syncButton.disabled = busy || readOnly;
-    revertButton.disabled = busy || readOnly || !activeTonePath || !modified;
-    byId('synthFileDirty').textContent = dirty ? 'Not recorded' : unprotectedChanges ? 'Recording…' : modified ? 'Modified' :
+    syncButton.disabled = busy || (readOnly&&!editingCode);
+    syncButton.textContent=editingCode?'Save code':syncFeedback?'✓ Synced':'Sync';
+    syncButton.title=editingCode?'Save this code file (Ctrl/Cmd+S)':'Sync this instrument (Ctrl/Cmd+S)';
+    revertButton.disabled = editingCode || busy || readOnly || !activeTonePath || !modified;
+    byId('synthFileDirty').textContent = editingCode?'Code':dirty ? 'Not recorded' : unprotectedChanges ? 'Recording…' : modified ? 'Modified' :
       activeTonePath ? (project.fs.checkpoints.has(activeTonePath) ? 'Synced' : 'Current') : '';
-    byId('synthActiveFilePath').textContent = !draftLoaded ? 'Restoring local project…' : activeTonePath || 'Built-in instrument';
+    byId('synthActiveFilePath').textContent = !draftLoaded ? 'Restoring local project…' : editingCode?(codeControls.activePath||'Code'):activeTonePath || 'Built-in instrument';
     byId('synthFileUndoButton').disabled = busy || !history.length;
     document.querySelector('.synth-editor').setAttribute('aria-busy', String(busy));
     for (const id of ['commonControls','operatorControls','channel3SpecialControls']) byId(id).inert = busy || readOnly;
+    if(byId('synthPsgSettings'))byId('synthPsgSettings').inert=busy||readOnly;
+    if(byId('synthPsgPresetSelect'))byId('synthPsgPresetSelect').disabled=busy||readOnly;
+    if(byId('synthPcmSettings'))byId('synthPcmSettings').inert=busy||readOnly;
+    if(byId('synthPcmCanvas'))byId('synthPcmCanvas').inert=busy||readOnly;
+    if(byId('synthPcmPresetSelect'))byId('synthPcmPresetSelect').disabled=busy||readOnly;
     for (const id of ['synthFileDuplicateButton','synthFileRenameButton','synthFileDeleteButton']) {
       byId(id).disabled = busy || !selectedPath || selectedPath === '/';
     }
     byId('synthFileNewButton').disabled = busy || readOnly;
     byId('synthFileNewFolderButton').disabled = busy;
+    if(byId('synthFileNewCodeButton'))byId('synthFileNewCodeButton').disabled=busy;
     byId('importPresetButton').disabled=busy;
     byId('importCassetteButton').disabled=busy;
     byId('exportCassetteButton').disabled=busy;
     byId('presetSelect').disabled=busy||readOnly;
+    codeControls?.setBusy?.(busy);
   }
   function render() {
     document.body.classList.toggle('synth-files-open',!panel.hidden);
@@ -212,10 +277,12 @@ export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, a
     return path;
   }
   function ensureTonePath() {
+    if(getEditorKind()!==editorKind||kindOfPreset(getPreset())!==editorKind||kindOfPreset(basePreset)!==editorKind||
+      activeTonePath&&kindOfPath(activeTonePath)!==editorKind)throw Error('Instrument editor and active file differ; open the instrument again before saving.');
     if (activeTonePath) return activeTonePath;
     const name = String(basePresetId || 'Instrument').replace(/^vfs:/, '').split('/').pop()
-      .replace(/\.(?:tfi|vgi)$/i, '').replace(/[^\p{L}\p{N}._ -]/gu, '_') || 'Instrument';
-    const path = project.uniquePath('/presets/' + name + '.vgi');
+      .replace(/\.(?:psg|pcm)\.json$|\.(?:tfi|vgi)$/i, '').replace(/[^\p{L}\p{N}._ -]/gu, '_') || 'Instrument';
+    const path = project.uniquePath('/presets/' + name + extensionForKind(editorKind));
     project.writeTone(path, basePreset, {overwrite:false, baselinePreset:basePreset});
     activeTonePath = selectedPath = path;
     onSaved(path); reveal(path);
@@ -233,6 +300,7 @@ export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, a
     } catch (error) {report(error); updateButtons(); return false;}
   }
   async function flushEdits() {
+    await codeControls?.flush?.();
     if (!persistCurrentTone()) return false;
     // Do not replace tone A's recovery journal with tone B until A is durable.
     if ((pendingTone || unprotectedChanges) && !await remember(true)) {
@@ -281,15 +349,17 @@ export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, a
       if (tone && path !== activeTonePath && !await flushEdits()) return false;
       selectedPath = path;
       project.select(path);
+      if(isCodePath(path))await codeControls?.openFile?.(path);
       if (tone && path !== activeTonePath) {
         stopAllNotes();
+        activateEditor(kindOfPreset(tone.preset),false);
         activeTonePath = path;
         dirty = false;
         applyPreset('vfs:' + path);
         setBaseline();
-      }
-      reveal(path); render(); remember();
-      byId('synthFileSelectionInfo').textContent = tone ? path : `${path} · kept in Cassette`;
+      } else if(tone) {stopAllNotes();setEditorKind(editorKind);}
+      reveal(path);render();await remember(true);
+      byId('synthFileSelectionInfo').textContent = tone || isCodePath(path) ? path : `${path} · kept in Cassette`;
       return true;
     } catch (error) {report(error); return false;}
     finally {busy=false;updateButtons();}
@@ -302,9 +372,22 @@ export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, a
     busy=true;updateButtons();
     try {
       if (!await flushEdits()) return false;
+      const kind=['pcm','psg'].find(candidate=>id===getDefaultPresetId(candidate)&&id!==getDefaultPresetId('fm'))??'fm';
+      activateEditor(kind,false);
       activeTonePath = null; dirty = false;
-      stopAllNotes(); applyPreset(id);setBaseline();render();remember();return true;
+      stopAllNotes();applyPreset(id);setBaseline();render();await remember(true);return true;
     } catch (error) {report(error);return false;}
+    finally {busy=false;updateButtons();}
+  }
+  async function switchEditor(kind) {
+    validKind(kind);
+    if(busy||isObserving())return false;
+    if(kind===editorKind){setEditorKind(kind);return true;}
+    busy=true;updateButtons();
+    try {
+      if(!await flushEdits())return false;
+      stopAllNotes();activateEditor(kind);render();await remember(true);return true;
+    } catch(error) {report(error);return false;}
     finally {busy=false;updateButtons();}
   }
   async function createFromPreset(preset,name) {
@@ -315,6 +398,7 @@ export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, a
       pushUndo();
       const tone=project.createTone(preset,name);
       stopAllNotes();
+      activateEditor(kindOfPreset(tone.preset),false);
       activeTonePath=selectedPath=tone.path;dirty=false;
       applySnapshot(tone.preset,'vfs:'+tone.path);onSaved(tone.path);
       setBaseline();protectCurrentTone();reveal(tone.path);render();
@@ -326,11 +410,15 @@ export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, a
   }
   async function perform(action, path = selectedPath) {
     if (busy) return;
-    if (isObserving() && ['sync','revert','new'].includes(action)) {setStatus('Choose Synth to edit an instrument.'); return;}
+    if (isObserving() && ['sync','revert','new'].includes(action)&&!(action==='sync'&&codeControls?.isCodeMode?.())) {setStatus('Choose Synth to edit an instrument.'); return;}
     busy=true;updateButtons();
     closeMenu();
     try {
-      if (action === 'sync') {await syncCurrentTone(); return;}
+      if (action === 'sync') {
+        if(codeControls?.isCodeMode?.()){await codeControls.flush();setStatus(`Saved ${codeControls.activePath||'code'}.`);}
+        else await syncCurrentTone();
+        return;
+      }
       if (action === 'revert') {await revertTone(); return;}
       if (action === 'undo') {
         if (!await flushEdits()) return;
@@ -338,25 +426,39 @@ export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, a
         if (history.length) {
           const previous = history.pop();
           project.restore(previous.project);
+          codeControls?.workspaceReplaced?.();savedCodeState=previous.codeState??null;
           onWorkspaceReplaced?.();
           workspaceId = newWorkspaceId(); generation = 0;
+          const contexts=Object.entries(previous.editorContexts??{}).map(([kind,value])=>[kind,validateEditorContext(value,kind)]);
+          editorContexts.clear();for(const [kind,value]of contexts)editorContexts.set(kind,value);
+          editorKind=validKind(previous.editorKind??kindOfPreset(previous.preset));setEditorKind(editorKind);
           activeTonePath = previous.activeTonePath; selectedPath = previous.selectedPath; dirty = previous.dirty;
           basePresetId=previous.basePresetId;basePreset=previous.basePreset;
           stopAllNotes(); applySnapshot(previous.preset, previous.presetId);
+          if(savedCodeState)await codeControls?.restoreState?.(savedCodeState);
         }
         render(); await remember(true); setStatus('Undid file operation.'); return;
       }
       if (!await flushEdits()) return;
       if (action === 'new') {
         const directory = path?.startsWith('/presets') ? (project.fs.listDirectories().includes(path)?path:dirname(path)) : '/presets';
-        const filename = await askName('New instrument', 'Untitled.vgi', value => {
-          validateDestination(directory,value);if(!isSynthTonePath(value))throw Error('Use a .tfi or .vgi file name.');
+        const filename = await askName('New instrument','Untitled'+extensionForKind(editorKind),value => {
+          validateDestination(directory,value);if(!isSynthTonePath(value)||kindOfPath(value)!==editorKind)throw Error(editorKind==='fm'?'Use a .tfi or .vgi file name.':`Use a .${editorKind}.json file name.`);
         });
         if (!filename) return;
         pushUndo();
         const next = `${directory}/${filename}`;
         project.writeTone(next, getPreset(), {overwrite:false});
         activeTonePath = selectedPath = next; dirty = false; onSaved(next);setBaseline();reveal(next);
+      } else if(action==='code') {
+        const directory=path&&project.fs.listDirectories().includes(path)?path:isCodePath(path)?dirname(path):'/';
+        const filename=await askName('New JavaScript file','Untitled.js',value=>{
+          validateDestination(directory,value);if(!isCodePath(value))throw Error('Use a .js or .mjs file name.');
+        });
+        if(!filename)return;
+        pushUndo();const next=`${directory==='/'?'':directory}/${filename}`;
+        project.fs.writeText(next,'');selectedPath=next;project.select(next);reveal(next);
+        await codeControls?.openFile?.(next);
       } else if (action === 'folder') {
         const directory = path && project.fs.listDirectories().includes(path) ? path : path ? dirname(path) : '/presets';
         const name = await askName('New folder', 'New Set', value => validateDestination(directory,value));
@@ -364,20 +466,26 @@ export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, a
         pushUndo(); const next = `${directory === '/' ? '' : directory}/${name}`; project.mkdir(next); selectedPath = next; expanded.set(next,true);
       } else if (action === 'duplicate') {
         pushUndo(); const next = project.duplicate(path); selectedPath = next; reveal(next);
-        if (isSynthTonePath(next)) {activeTonePath=next;dirty=false;applyPreset('vfs:'+next);setBaseline();}
+        if (isSynthTonePath(next)) {stopAllNotes();activateEditor(kindOfPath(next),false);activeTonePath=next;dirty=false;applyPreset('vfs:'+next);setBaseline();}
+        else if(isCodePath(next))await codeControls?.openFile?.(next);
       } else if (action === 'rename') {
         const nextName = await askName('Rename', basename(path), value => {
           validName(value); if(value!==basename(path))validateDestination(dirname(path),value);
-          if(isSynthTonePath(path)&&value.match(/\.(tfi|vgi)$/i)?.[0].toLowerCase()!==path.match(/\.(tfi|vgi)$/i)[0].toLowerCase())throw Error('Keep the current instrument file extension.');
+          if(isSynthTonePath(path)&&toneExtension(value)!==toneExtension(path))throw Error('Keep the current instrument file extension.');
+          if(isCodePath(path)&&!isCodePath(value))throw Error('Keep a .js or .mjs file extension.');
         });
         if (!nextName || nextName === basename(path)) return;
         pushUndo(); const previous = activeTonePath; const next = project.rename(path,nextName);
+        remapEditors(path,next);
+        codeControls?.pathChanged?.(path,next);
         selectedPath = next;
         if (inside(previous,path)) {activeTonePath=next+previous.slice(path.length);onSaved(activeTonePath);setBaseline();}
         reveal(next);
       } else if (action === 'delete') {
         pushUndo(); project.delete(path,{recursive:true});
-        if (inside(activeTonePath,path)) {activeTonePath=null;dirty=false;stopAllNotes();applyPreset('one-op-basic');setBaseline();}
+        remapEditors(path);
+        codeControls?.pathChanged?.(path,null);
+        if (inside(activeTonePath,path)) {activeTonePath=null;dirty=false;stopAllNotes();applyPreset(getDefaultPresetId(editorKind));setBaseline();}
         selectedPath = null;
       }
       render(); await remember(true); setStatus(`${action === 'delete' ? 'Deleted' : 'Updated'} ${selectedPath || path || 'Cassette'}.`);
@@ -392,6 +500,9 @@ export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, a
       pushUndo();
       if(copy)destination=project.duplicate(source,project.uniquePath(destination));
       else project.move(source,destination);
+      if(!copy)remapEditors(source,destination);
+      if(!copy)codeControls?.pathChanged?.(source,destination);
+      else if(isCodePath(destination))await codeControls?.openFile?.(destination);
       if(!copy&&inside(activeTonePath,source)){activeTonePath=destination+activeTonePath.slice(source.length);onSaved(activeTonePath);setBaseline();}
       selectedPath=destination;reveal(destination);render();await remember(true);setStatus(`${copy?'Copied':'Moved'} ${destination}.`);
     }catch(error){report(error);}finally{busy=false;updateButtons();}
@@ -405,20 +516,35 @@ export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, a
     try{
       if(!await flushEdits())return;
       previous=capture();
-      const result=await project.importInstrumentFiles(selection,{...(directory?{directory}:{}),isCurrent:()=>requestGeneration===importGeneration});
+      const codeFiles=selection.filter(file=>isCodePath(file.name)),instruments=selection.filter(file=>!isCodePath(file.name));
+      const codeEntries=[];const occupied=new Set(project.listEntries().map(entry=>entry.path));
+      for(const file of codeFiles) {
+        if(file.size>2*1024*1024)throw Error('JavaScript file exceeds 2 MiB.');
+        const filename=basename(String(file.name));validName(filename);
+        const bytes=file.data??new Uint8Array(await file.arrayBuffer());
+        const text=typeof bytes==='string'?bytes:new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(bytes);
+        if(text.length>2*1024*1024)throw Error('JavaScript file exceeds 2 MiB.');
+        const path=project.uniquePath(`${directory&&directory!=='/'?directory:''}/${filename}`,occupied);occupied.add(path);
+        codeEntries.push({path,data:text});
+      }
+      const result=instruments.length?await project.importInstrumentFiles(instruments,{...(directory?{directory}:{}),isCurrent:()=>requestGeneration===importGeneration}):{paths:[],sourcePaths:[],failures:[],notices:[]};
       if(result.cancelled)return;
+      if(requestGeneration!==importGeneration)return;
+      if(codeEntries.length)project.fs.writeFiles(codeEntries);
       const sourcePaths=result.sourcePaths;
-      if(result.paths.length||sourcePaths.length){
+      if(result.paths.length||sourcePaths.length||codeEntries.length){
         pushUndo(previous);
-        if(result.paths.length){activeTonePath=selectedPath=result.paths[0];dirty=false;stopAllNotes();applyPreset('vfs:'+activeTonePath);setBaseline();reveal(activeTonePath);}
-        else{selectedPath=sourcePaths[0];project.select(selectedPath);}
+        if(result.paths.length){stopAllNotes();activateEditor(kindOfPath(result.paths[0]),false);activeTonePath=selectedPath=result.paths[0];dirty=false;applyPreset('vfs:'+activeTonePath);setBaseline();reveal(activeTonePath);}
+        else{selectedPath=sourcePaths[0]??codeEntries[0].path;project.select(selectedPath);}
+        if(!result.paths.length&&!sourcePaths.length&&codeEntries.length)await codeControls?.openFile?.(codeEntries[0].path);
         for(const path of sourcePaths)reveal(path);
-        byId('synthFileSelectionInfo').textContent=result.paths.length?activeTonePath:`${selectedPath} · Original VGM saved in Cassette`;
+        for(const entry of codeEntries)reveal(entry.path);
+        byId('synthFileSelectionInfo').textContent=result.paths.length?activeTonePath:codeEntries.length&&!sourcePaths.length?selectedPath:`${selectedPath} · Original VGM saved in Cassette`;
         panel.hidden=false;workspace.classList.add('has-files');toggle.setAttribute('aria-expanded','true');toggle.classList.add('is-selected');
       }
       if(result.failures.length){importError.textContent=`Could not load some files:\n${result.failures.join('\n')}${result.paths.length?'':' Previous presets were kept.'}`;importError.hidden=false;}
       notice.textContent=result.notices.join('\n');notice.hidden=!result.notices.length;
-      setStatus(`Loaded ${result.paths.length} instrument(s).${sourcePaths.length?` Saved ${sourcePaths.length} original VGM file(s) in /vgm/.`:''}${result.failures.length?' Some files could not be loaded.':''}`);
+      setStatus(`Loaded ${result.paths.length} instrument(s).${codeEntries.length?` Added ${codeEntries.length} code file(s).`:''}${sourcePaths.length?` Saved ${sourcePaths.length} original VGM file(s) in /vgm/.`:''}${result.failures.length?' Some files could not be loaded.':''}`);
       render();await remember(true);
     }catch(error){report(error);}finally{busy=false;updateButtons();document.activeElement?.blur?.();}
   }
@@ -432,9 +558,11 @@ export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, a
       const result=await project.importCassette(new Uint8Array(await file.arrayBuffer()),{name:file.name,isCurrent:()=>requestGeneration===importGeneration});
       if(result.cancelled)return;
       workspaceId=newWorkspaceId();generation=0;
+      savedCodeState=null;codeControls?.workspaceReplaced?.();
       onWorkspaceReplaced?.();
       pushUndo(previous);dirty=false;selectedPath=project.selectedPath;activeTonePath=isSynthTonePath(selectedPath)?selectedPath:null;
-      stopAllNotes();if(activeTonePath){applyPreset('vfs:'+activeTonePath);reveal(activeTonePath);}else applyPreset('one-op-basic');setBaseline();
+      editorContexts.clear();
+      stopAllNotes();if(activeTonePath){editorKind=kindOfPath(activeTonePath);setEditorKind(editorKind);applyPreset('vfs:'+activeTonePath);reveal(activeTonePath);}else{setEditorKind(editorKind);applyPreset(getDefaultPresetId(editorKind));}setBaseline();
       panel.hidden=false;workspace.classList.add('has-files');toggle.setAttribute('aria-expanded','true');toggle.classList.add('is-selected');
       render();await remember(true);setStatus(`Imported ${file.name}.`);
     }catch(error){setStatus(`Failed to import Cassette: ${error.message}`);}finally{busy=false;updateButtons();document.activeElement?.blur?.();}
@@ -457,8 +585,9 @@ export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, a
   panel.addEventListener('pointerdown',event=>{if(event.target.closest('button'))event.preventDefault();});
   panel.addEventListener('click',event=>{const item=event.target.closest('summary[data-file-path],.file-tree-root[data-file-path]');if(item){selectedPath=item.dataset.filePath;updateButtons();}});
   panel.addEventListener('keydown',event=>{if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' ','Enter','Home','End','ContextMenu'].includes(event.key))event.stopPropagation();});
-  const actions={synthFileSaveButton:'sync',synthFileRevertButton:'revert',synthFileNewButton:'new',synthFileDuplicateButton:'duplicate',synthFileRenameButton:'rename',synthFileDeleteButton:'delete',synthFileUndoButton:'undo',synthFileNewFolderButton:'folder'};
+  const actions={synthFileSaveButton:'sync',synthFileRevertButton:'revert',synthFileNewButton:'new',synthFileNewCodeButton:'code',synthFileDuplicateButton:'duplicate',synthFileRenameButton:'rename',synthFileDeleteButton:'delete',synthFileUndoButton:'undo',synthFileNewFolderButton:'folder'};
   for(const [id,action]of Object.entries(actions)){
+    if(!byId(id))continue;
     byId(id).addEventListener('pointerdown',event=>event.preventDefault());
     byId(id).addEventListener('keydown',event=>{if(event.key===' '||event.key==='Enter')event.stopPropagation();});
     byId(id).addEventListener('click',()=>void perform(action));
@@ -500,12 +629,26 @@ export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, a
       draftStore=await openDraftStore();
       const saved=draftStore?await new Promise((resolve,reject)=>{const request=draftStore.transaction('projects','readonly').objectStore('projects').get('current');request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);}):null;
       workspaceId=saved?.workspaceId||newWorkspaceId();generation=Number.isSafeInteger(saved?.generation)?saved.generation:0;
+      savedCodeState=saved?.codeState??null;
       restoring=true;
       if(saved?.project){
         project.restore(saved.project);
         // Files are restored even if a user already tried a knob. In that case
         // retain the unsaved sound rather than replacing it with the old tone.
         activeTonePath=!dirty&&saved.activeTonePath&&project.fs.has(saved.activeTonePath)?saved.activeTonePath:null;
+        if(!dirty&&saved.editorContexts!==undefined) {
+          try {
+            if(!saved.editorContexts||typeof saved.editorContexts!=='object'||Array.isArray(saved.editorContexts))throw Error('Invalid saved editor contexts');
+            const contexts=Object.entries(saved.editorContexts).map(([kind,value])=>[kind,validateEditorContext(value,kind)]);
+            for(const [kind,value]of contexts)editorContexts.set(kind,value);
+            const kind=validKind(saved.editorKind??(activeTonePath?kindOfPath(activeTonePath):'fm')),context=editorContexts.get(kind);
+            editorKind=kind;setEditorKind(kind);
+            if(context) {
+              activeTonePath=context.activeTonePath;basePresetId=context.basePresetId;basePreset=structuredClone(context.basePreset);dirty=context.dirty;
+              applySnapshot(context.preset,context.presetId);
+            }
+          } catch(error) {activeTonePath=null;editorContexts.clear();throw error;}
+        }
         if(!visibilityTouched)panel.hidden=saved.filesVisible===false;
       }
       let recovered=false;
@@ -522,7 +665,7 @@ export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, a
         }
       }catch(error){setStatus(`Could not restore the last tone edit: ${error.message}. The local Cassette draft is still available.`);}
       selectedPath=activeTonePath||project.selectedPath;
-      if(activeTonePath){project.readTone(activeTonePath);applyPreset('vfs:'+activeTonePath);setBaseline();reveal(activeTonePath);}
+      if(activeTonePath){project.readTone(activeTonePath);editorKind=kindOfPath(activeTonePath);setEditorKind(editorKind);applyPreset('vfs:'+activeTonePath);setBaseline();reveal(activeTonePath);}
       workspace.classList.toggle('has-files',!panel.hidden);toggle.setAttribute('aria-expanded',String(!panel.hidden));toggle.classList.toggle('is-selected',!panel.hidden);
       restoring=false;render();
       // Persist an identity before enabling controls, so a subsequent journal
@@ -534,7 +677,12 @@ export function setupSynthFiles({project, getPreset, getPresetId, applyPreset, a
     }catch(error){restoring=false;setStatus(`Local draft unavailable: ${error.message}. Cassette import/export is still available.`);}
     finally{draftLoaded=true;busy=false;if(dirty)persistCurrentTone();render();remember();}
   })();
-  return {ready, selectFile, selectPreset, importInstruments, createFromPreset, get activeTonePath(){return activeTonePath;},
+  return {ready,selectFile,selectPreset,switchEditor,importInstruments,createFromPreset,
+    setCodeControls(controls){codeControls=controls;updateButtons();},
+    getCodeState:()=>savedCodeState==null?null:structuredClone(savedCodeState),
+    rememberCodeState(state){savedCodeState=structuredClone(state);updateButtons();remember();},
+    persistCode:()=>remember(true),get workspaceId(){return workspaceId;},
+    get activeTonePath(){return activeTonePath;},
     get dirty(){return dirty||Boolean(activeTonePath&&project.isToneModified(activeTonePath));},
     markDirty(){dirty=true;clearSyncFeedback();if(draftLoaded&&!busy)persistCurrentTone();else updateButtons();}, refresh:render};
 }
