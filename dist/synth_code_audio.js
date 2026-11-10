@@ -7,6 +7,7 @@ import {encodeRf5c164,sampleBytes} from './js/rf5c164_pcm.js';
 import {decodeAudioBuffer} from './js/audio_decode.js';
 import {SEGAPSG_CLOCK} from './js/segapsg.js';
 import {noteToHz,opnPitchFromHz} from './js/soundchip_pitch.js';
+import {rf5c164MidiNote,rf5c164NoteStep} from './js/rf5c164_notes.js?v=shared-notes-1';
 import {PCM_NATIVE_RATE} from './synth_pcm.js?v=pcm-release-1';
 import {SYNTH_SONG_MIX_DEFAULTS} from './synth_song_mix_defaults.js?v=mix-source-1';
 import {createSynthPerformanceTarget,normalizeCapturedVoice} from './synth_performance.js?v=op-gates-1';
@@ -20,6 +21,23 @@ const integer=(value,max,label)=>{
 const clampStep=value=>Math.max(1,Math.min(65535,Math.round(value)));
 const object=value=>value&&typeof value==='object'&&!Array.isArray(value);
 
+// App-only stereo output policy. PWM FIFO timing and register state remain
+// untouched: muted sides still render and advance behind their output gains.
+function createPwmStereoGate(context,output,{muted}) {
+  const nodes=[];let closed=false;
+  const dispose=()=>{if(closed)return;closed=true;for(const node of nodes)node.disconnect();};
+  try {
+    const input=context.createChannelSplitter(2);nodes.push(input);
+    const sides=[context.createGain(),context.createGain()];nodes.push(...sides);
+    const merger=context.createChannelMerger(2);nodes.push(merger);
+    sides.forEach((side,ch)=>{
+      side.gain.value=muted[ch]?0:1;input.connect(side,ch,0);side.connect(merger,0,ch);
+    });
+    merger.connect(output);
+    return {input,setChannelMuted(ch,value){if(!closed)sides[ch].gain.value=value?0:1;},dispose};
+  } catch(error){dispose();throw error;}
+}
+
 /**
  * getInput is the performance bus, initially connected directly to getOutput.
  * Editor Master/System gains are already applied before that bus. This host
@@ -27,13 +45,16 @@ const object=value=>value&&typeof value==='object'&&!Array.isArray(value);
  */
 export function createSynthCodeAudio({ensureChip=async()=>{},getContext,getInput,getOutput,getFm,getPsg,getPsgVoice,
   getPcm,getPcmVoice,getFmVoice=()=>null,getMaster=()=>1,onLog=()=>{},createFxRack=createNativeFXRack,
-  createPwmDevice=createPWM32XAudio,createPwmClient=createPWM32XClient}={}) {
-  for(const value of [ensureChip,getContext,getInput,getOutput,getFm,getPsg,getPsgVoice,getPcm,getPcmVoice,getFmVoice,getMaster,onLog,createFxRack,createPwmDevice,createPwmClient]) {
+  createPwmDevice=createPWM32XAudio,createPwmClient=createPWM32XClient,createPwmGate=createPwmStereoGate}={}) {
+  for(const value of [ensureChip,getContext,getInput,getOutput,getFm,getPsg,getPsgVoice,getPcm,getPcmVoice,getFmVoice,getMaster,onLog,createFxRack,createPwmDevice,createPwmClient,createPwmGate]) {
     if(typeof value!=='function')throw TypeError('Code audio requires host callbacks');
   }
   let epoch=0,disposed=false,fxOwner=null,pwmOwner=null,pcmSeeded=false,pcmMemoryChanged=false,pcmSelected=0,stopping=null;
-  let lastPcmSettings=null,lastPsgSettings=null,psgLatched=0,pcmSourceGeneration=0;
+  let lastPcmSettings=null,lastPsgSettings=null,psgLatched=0,pcmSourceGeneration=0,pcmRootNote=null;
+  let pwmSourceVolume=SYNTH_SONG_MIX_DEFAULTS.pwm,pwmMaster=null;
+  const pwmChannelMutes=[false,false];
   const clients=new Map(),fmActive=new Set(),psgActive=new Map(),pcmChannels=new Map(),pcmActive=new Set(),pcmPending=new Map(),fxNames=new Set();
+  const pcmCodeRootChannels=new Set();
   const check=token=>{if(disposed||token!==epoch)throw cancelled();};
   const required=(get,label)=>{const api=get();if(!api)throw Error(`${label} audio is not ready`);return api;};
   const settingsPsg=()=>required(getPsgVoice,'PSG').getSettings();
@@ -92,16 +113,22 @@ export function createSynthCodeAudio({ensureChip=async()=>{},getContext,getInput
   function retirePwm(owner) {
     if(!owner||owner.closed)return;
     owner.closed=true;owner.abort.abort(cancelled());owner.gain.gain.value=0;
-    owner.api?.dispose();owner.device?.dispose();owner.gain.disconnect();
-    if(pwmOwner===owner)pwmOwner=null;
+    try {owner.api?.dispose();}
+    finally {
+      try {owner.device?.dispose();}
+      finally {owner.gain.disconnect();owner.gate.dispose();if(pwmOwner===owner)pwmOwner=null;}
+    }
   }
   async function preparePwm() {
     const context=getContext(),output=getInput();
     if(!context||context.state==='closed'||output?.context!==context)throw TypeError('PWM needs the host performance route');
     if(pwmOwner?.context===context&&pwmOwner.output===output)return pwmOwner.promise;
     retirePwm(pwmOwner);
-    const token=epoch,gain=context.createGain();gain.gain.value=SYNTH_SONG_MIX_DEFAULTS.pwm*getMaster();gain.connect(output);
-    const owner=pwmOwner={context,output,gain,abort:new AbortController(),device:null,api:null,closed:false,promise:null};
+    const token=epoch,gain=context.createGain();gain.gain.value=pwmSourceVolume*(pwmMaster??getMaster());
+    let gate;
+    try {gate=createPwmGate(context,output,{muted:[...pwmChannelMutes]});gain.connect(gate.input);}
+    catch(error){gain.disconnect();gate?.dispose();throw error;}
+    const owner=pwmOwner={context,output,gain,gate,abort:new AbortController(),device:null,api:null,closed:false,promise:null};
     owner.promise=Promise.resolve().then(()=>createPwmDevice(context,gain,{signal:owner.abort.signal,gain:1,outputMode:'duty',onError:error=>{
       if(pwmOwner!==owner)return;onLog(`PWM: ${error.message}`);retirePwm(owner);
     }})).then(device=>{
@@ -178,11 +205,15 @@ export function createSynthCodeAudio({ensureChip=async()=>{},getContext,getInput
     return {start:0,loopStart:s.loopEnabled?s.loopStart:s.loopEnd+1,volume:s.volume,pan:{left:s.panLeft,right:s.panRight},
       step:clampStep(preset.sample.sampleRate/PCM_NATIVE_RATE*2048*2**((60-s.rootNote)/12))};
   }
-  function setPcmChannel(ch,options) {
+  function writePcmChannel(ch,options) {
     integer(ch,7,'PCM channel');if(!object(options))throw TypeError('PCM channel settings must be an object');
     const api=required(getPcm,'PCM'),before=pcmChannels.get(ch)??defaultPcmChannel();
     api.setChannel(ch,options);
     pcmChannels.set(ch,{...before,...options,pan:options.pan?{...options.pan}:{...before.pan}});
+  }
+  function setPcmChannel(ch,options) {
+    writePcmChannel(ch,options);
+    if(options.step!==undefined)pcmCodeRootChannels.delete(ch);
   }
   function seedPcm() {
     if(pcmSeeded)return;
@@ -197,29 +228,61 @@ export function createSynthCodeAudio({ensureChip=async()=>{},getContext,getInput
   function pcmSourceChanged() {
     // The author has already stopped these channels and selected a new bank.
     // Other Code chips and the shared effects keep their current performance.
-    pcmSourceGeneration++;pcmPending.clear();pcmActive.clear();pcmChannels.clear();pcmSeeded=false;pcmMemoryChanged=false;pcmSelected=0;
+    pcmSourceGeneration++;pcmPending.clear();pcmActive.clear();pcmChannels.clear();pcmCodeRootChannels.clear();pcmRootNote=null;
+    pcmSeeded=false;pcmMemoryChanged=false;pcmSelected=0;
     lastPcmSettings=settingsPcm();
   }
   function startPcm(ch) {
     seedPcm();const value=required(getPcm,'PCM').keyOn(ch);pcmActive.add(ch);return value;
   }
-  function keyOnPcm(ch) {
+  function keyOnPcm(ch,beforeStart) {
     integer(ch,7,'PCM channel');pcmPending.delete(ch);
     const voice=required(getPcmVoice,'PCM');
-    if(typeof voice.isReady!=='function'||voice.isReady()!==false)return startPcm(ch);
+    if(typeof voice.isReady!=='function'||voice.isReady()!==false){beforeStart?.();return startPcm(ch);}
     const owner={epoch},wanted=()=>!disposed&&owner.epoch===epoch&&pcmPending.get(ch)===owner;
     pcmPending.set(ch,owner);
     return Promise.resolve().then(()=>{if(wanted())return ensureChip('rf5c164');}).then(()=>{
       if(!wanted())return false;
       pcmPending.delete(ch);
       if(typeof voice.isReady==='function'&&voice.isReady()===false)throw Error('PCM sample RAM is not ready');
+      beforeStart?.();
       return startPcm(ch);
     },error=>{
       if(!wanted())return false;
       pcmPending.delete(ch);throw error;
     });
   }
+  // Software tuning: Root note names the author's sample at its original
+  // sample rate. It is not a detected fundamental or a one-cycle assumption.
+  function checkPcmNoteTuning() {
+    if(pcmMemoryChanged)throw Error('PCM note helpers use the editor sample tuning. After Code sample-memory writes, use setPitch() and keyOn().');
+  }
+  function setPcmRootNote(note) {
+    // Code metadata affects subsequent note helpers, never the editor or an
+    // already configured voice. null resumes following the editor Root note.
+    const next=note===null?null:rf5c164MidiNote(note);
+    const effective=next??settingsPcm().rootNote;
+    pcmRootNote=next;
+    return effective;
+  }
+  function setNotePcm(ch,note) {
+    integer(ch,7,'PCM channel');
+    const midi=rf5c164MidiNote(note);
+    checkPcmNoteTuning();
+    const preset=required(getPcmVoice,'PCM').getPreset();
+    const step=rf5c164NoteStep(midi,{rootNote:pcmRootNote??preset.settings.rootNote,
+      baseStep:preset.sample.sampleRate/PCM_NATIVE_RATE*2048});
+    writePcmChannel(ch,{step});
+    if(pcmRootNote===null)pcmCodeRootChannels.delete(ch);else pcmCodeRootChannels.add(ch);
+    return step;
+  }
+  function noteOnPcm(ch,note) {
+    setNotePcm(ch,note);
+    const pending=keyOnPcm(ch,checkPcmNoteTuning);
+    if(pending&&typeof pending.then==='function')return pending.then(()=>{});
+  }
   const pcmOverrides={setChannel:setPcmChannel,setPitch:(ch,step)=>setPcmChannel(ch,{step}),
+    setRootNote:setPcmRootNote,setNote:setNotePcm,noteOn:noteOnPcm,
     keyOn:keyOnPcm,
     keyOff:ch=>{integer(ch,7,'PCM channel');pcmPending.delete(ch);const api=required(getPcm,'PCM');if(typeof api.releaseNote==='function')api.releaseNote(ch);else api.keyOff(ch);pcmActive.delete(ch);},
     noteOff:ch=>pcmOverrides.keyOff(ch),allNotesOff:stopPcm,dispose:stopPcm,
@@ -251,10 +314,11 @@ export function createSynthCodeAudio({ensureChip=async()=>{},getContext,getInput
       if(register===1)state.pan={left:value&15,right:value>>4};
       if(register===2)state.step=(state.step&65280)|value;
       if(register===3)state.step=(state.step&255)|(value<<8);
+      if(register===2||register===3)pcmCodeRootChannels.delete(pcmSelected);
       pcmChannels.set(pcmSelected,state);
       if(register===8)for(let ch=0;ch<8;ch++){if(value&(1<<ch))pcmActive.delete(ch);else pcmActive.add(ch);}
     },
-    reset() {stopPcm();pcmChannels.clear();pcmSeeded=false;return required(getPcm,'PCM').reset();},
+    reset() {stopPcm();pcmChannels.clear();pcmCodeRootChannels.clear();pcmSeeded=false;return required(getPcm,'PCM').reset();},
   };
   function syncPsgSettings(previous=lastPsgSettings) {
     const next=settingsPsg(),api=getPsg();lastPsgSettings=next;
@@ -269,9 +333,9 @@ export function createSynthCodeAudio({ensureChip=async()=>{},getContext,getInput
     if(!api||!pcmChannels.size)return;
     for(const ch of pcmChannels.keys()) {
       const current=pcmChannels.get(ch)??defaultPcmChannel();
-      setPcmChannel(ch,{volume:next.volume,pan:{left:next.panLeft,right:next.panRight},
+      writePcmChannel(ch,{volume:next.volume,pan:{left:next.panLeft,right:next.panRight},
         loopStart:next.loopEnabled?next.loopStart:next.loopEnd+1,
-        step:previous?clampStep(current.step*2**((previous.rootNote-next.rootNote)/12)):current.step});
+        step:previous&&!pcmCodeRootChannels.has(ch)?clampStep(current.step*2**((previous.rootNote-next.rootNote)/12)):current.step});
     }
   }
   function fmVoice(ch) {
@@ -317,7 +381,7 @@ export function createSynthCodeAudio({ensureChip=async()=>{},getContext,getInput
     fxNames.clear();
     if(fxOwner?.rack){fxOwner.rack.stop();fxOwner.rack.controller.dispose();restoreDirect(fxOwner);}
     else retireFx(fxOwner);
-    pcmSeeded=false;pcmChannels.clear();
+    pcmSeeded=false;pcmChannels.clear();pcmCodeRootChannels.clear();pcmRootNote=null;
     const restore=pcmMemoryChanged;pcmMemoryChanged=false;
     const task=Promise.resolve().then(async()=>{
       if(restore){const voice=getPcmVoice(),api=getPcm();if(voice&&api){voice.setPreset(voice.getPreset());await voice.install(api);}}
@@ -325,7 +389,19 @@ export function createSynthCodeAudio({ensureChip=async()=>{},getContext,getInput
     stopping=task;return task;
   }
   return {prepare,useSoundChip,fx,getFm:()=>client('ym2612',fmOverrides,getFm),syncFmVoice,syncPsgSettings,syncPcmSettings,pcmSourceChanged,
-    setMaster(value){if(typeof value!=='number'||!Number.isFinite(value)||value<0||value>3.8)throw RangeError('Code Master must be 0..3.8');if(pwmOwner)pwmOwner.gain.gain.value=value*SYNTH_SONG_MIX_DEFAULTS.pwm;},
+    setMaster(value){
+      if(typeof value!=='number'||!Number.isFinite(value)||value<0||value>3.8)throw RangeError('Code Master must be 0..3.8');
+      pwmMaster=value;if(pwmOwner)pwmOwner.gain.gain.value=value*pwmSourceVolume;
+    },
+    setPwmSourceVolume(value){
+      if(typeof value!=='number'||!Number.isFinite(value)||value<0||value>3.8)throw RangeError('PWM source volume must be 0..3.8');
+      pwmSourceVolume=value;if(pwmOwner)pwmOwner.gain.gain.value=value*(pwmMaster??getMaster());
+    },
+    setPwmChannelMuted(side,value){
+      integer(side,1,'PWM side');if(typeof value!=='boolean')throw TypeError('PWM muted must be a boolean');
+      if(pwmChannelMutes[side]===value)return;
+      pwmChannelMutes[side]=value;pwmOwner?.gate.setChannelMuted(side,value);
+    },
     stop,async dispose(){if(disposed)return;disposed=true;await stop();retireFx(fxOwner);},
-    getState:()=>({pwmReady:Boolean(pwmOwner?.api),fxRouted:Boolean(fxOwner?.routed),fxNames:[...fxNames],fmChannels:[...fmActive],psgChannels:[...psgActive.keys()],pcmChannels:[...pcmActive]})};
+    getState:()=>({pwmReady:Boolean(pwmOwner?.api),pwmChannelMutes:[...pwmChannelMutes],fxRouted:Boolean(fxOwner?.routed),fxNames:[...fxNames],fmChannels:[...fmActive],psgChannels:[...psgActive.keys()],pcmChannels:[...pcmActive]})};
 }

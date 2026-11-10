@@ -122,6 +122,9 @@
       .synth-workspace { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; align-items: start; }
       .synth-workspace.has-files { grid-template-columns: 250px minmax(0, 1fr); }
       .synth-editor { min-width: 0; }
+      .synth-workspace.is-code-expanded > .synth-editor { display:none; }
+      #synthExpandedCodeSlot { min-width:0; }
+      #synthExpandedCodeSlot[hidden] { display:none; }
       .synth-files-panel { min-width: 0; border: 1px solid #41615b; border-radius: 14px; padding: 12px; background: #172423; }
       .synth-files-panel[hidden], .synth-file-editor-heading[hidden] { display: none; }
       .synth-files-heading, .synth-file-editor-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
@@ -178,10 +181,12 @@
       .synth-song-live-controls input { margin: 0; }
       #synthSongChannelSelect { font: inherit; border: 1px solid #41615b; border-radius: 999px; color: #e4eee8; background: #1b2929; padding: 4px 6px; }
       #synthSongLiveStatus { color: #8bd9ca; font-size: .65rem; overflow-wrap: anywhere; }
-      #synthSongMixPanel { position: fixed; z-index: 100; box-sizing: border-box; overflow: auto; padding: 12px; background: #172423; color: #e4eee8; border: 1px solid #7c9d91; border-radius: 12px; box-shadow: 0 8px 30px #0008; font-size: .75rem; }
-      #synthSongMixPanel[hidden] { display: none; }
+      #synthSongMixPanel { box-sizing: border-box; min-width:0; padding:12px; background:#172423; color:#e4eee8; border:1px solid #41615b; border-radius:12px; font-size:.75rem; }
       .synth-song-mix-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
-      #synthSongMixChannels fieldset { min-width: 0; margin: 8px 0 0; padding: 6px; border: 1px solid #35504b; border-radius: 8px; display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 4px 8px; }
+      #synthSongMixChannelStatus { color:#a8bfba; margin-left:auto; font-size:.68rem; }
+      #synthSongMixChannels { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+      #synthSongMixChannels fieldset { min-width: 0; margin:0; padding:6px; border:1px solid #35504b; border-radius:8px; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:4px 8px; }
+      @media(max-width:600px) { #synthSongMixChannels { grid-template-columns:minmax(0,1fr); } }
       #synthSongMixChannels legend { color: #a8bfba; padding: 0 4px; }
       .synth-song-mix-channel { display: flex; align-items: center; gap: 4px; }
       .synth-song-mix-channel > span { flex: 1; min-width: 0; }
@@ -383,6 +388,10 @@
       .synth-pcm-number .param-button { width: 26px; height: 26px; }
       .synth-pcm-number .param-value { min-width: 45px; min-height: 26px; font-size: .78rem; touch-action: none; font-variant-numeric: tabular-nums; }
       #synthPcmCanvas { touch-action: none; }
+      #synthPcmCanvas[data-pcm-tool="draw"]:not([inert]) { cursor: crosshair; }
+      .synth-pcm-edit-modes { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; }
+      .synth-pcm-edit-modes[hidden] { display: none; }
+      .synth-pcm-edit-modes > span { font-size: .65rem; color: #a8bfba; margin-right: 2px; }
       #synthPcmLoadStatus { color: #dfbd90; overflow-wrap: anywhere; font-size: .68rem; }
       .synth-pcm-field[hidden] { display: none; }
       .synth-pcm-step { text-align: center; padding: 6px; border: 1.5px solid var(--pill-border); border-radius: 999px; font-weight: 800; color: var(--ink); font-variant-numeric: tabular-nums; }
@@ -978,13 +987,20 @@
 
       .performance-keyboard { display: flex; gap: 10px; align-items: stretch; }
       #synthKeyboardPanel[hidden], #synthCodePanel[hidden] { display:none; }
-      .synth-input-tabs { margin-bottom:10px; }
+      .synth-input-heading { display:flex; align-items:center; gap:8px; margin-bottom:10px; min-width:0; }
+      .synth-input-tabs { flex:1; min-width:0; }
+      #synthCodeMixerButton { display:none; flex:none; }
+      .is-code-expanded #synthCodeMixerButton { display:inline-flex; align-items:center; }
+      #synthCodeExpandButton { display:grid; place-items:center; width:28px; height:28px; flex:none; padding:3px; border-radius:7px; }
+      #synthCodeExpandButton[hidden] { display:none; }
+      #synthCodeExpandButton svg { width:18px; height:18px; }
       .synth-code-toolbar { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-bottom:8px; }
       .synth-code-toolbar .synth-code-state { margin-left:auto; color:#b3c9c3; font-size:.7rem; }
       .synth-code-editor-wrap { position:relative; min-width:0; border:1px solid #41615b; border-radius:12px; overflow:hidden; background:#111b1c; }
       #synthCodeEditor { display:block; width:100%; min-height:280px; height:320px; resize:vertical; padding:14px; border:0; border-radius:0; box-sizing:border-box; color:#dcebe5; background:#111b1c; font:13px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace; tab-size:2; }
       #synthCodeEditorHost { height:320px; min-width:0; }
       #synthCodeEditorHost:not([data-ready="true"]) { display:none; }
+      #synthExpandedCodeSlot #synthCodeEditor, #synthExpandedCodeSlot #synthCodeEditorHost { height:clamp(360px, calc(100dvh - 330px), 1000px); }
       .synth-code-note { color:#9ab6ad; font-size:.66rem; line-height:1.5; margin:6px 0; }
       .synth-code-log { white-space:pre-wrap; overflow-wrap:anywhere; max-height:130px; overflow:auto; margin:8px 0 0; padding:8px 10px; border:1px solid #2e4943; border-radius:8px; color:#b9d3c8; background:#101818; font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; }
       .synth-code-log:empty { display:none; }
@@ -1464,15 +1480,8 @@
                     <option value="3">CH4</option><option value="4">CH5</option><option value="5">CH6</option>
                   </select>
                   <button id="synthSongCopyButton" class="toolbar-button" type="button" aria-label="Copy selected channel to Synth" title="Pause to copy the selected FM channel into a new editable Synth instrument." disabled>Copy</button>
-                  <button id="synthSongMixButton" class="toolbar-button" type="button" aria-expanded="false" aria-controls="synthSongMixPanel" title="Adjust reference-song chip volumes and mute individual channels. Changes take about 0.2 seconds.">Mix</button>
                 </span>
                 <output id="synthSongLiveStatus">Play, then Pause to play this CH · Synth to edit</output>
-                <div id="synthSongMixPanel" role="group" aria-label="Reference playback mixer" hidden>
-                  <div class="synth-song-mix-heading"><strong>Playback mixer</strong><button id="synthSongMixReset" class="toolbar-button" type="button" title="Restore shared System levels and unmute channels.">Reset</button></div>
-                  <label class="synth-song-display-option" title="Briefly highlight changed Live values. Turn off to reduce visual updates."><input id="synthSongHighlightToggle" type="checkbox" checked>Live highlight</label>
-                  <label class="synth-song-display-option"><input id="synthSongSeekCacheToggle" type="checkbox" checked>Seek cache</label>
-                  <div id="synthSongMixChannels">Play a VGM to show its channels.</div>
-                </div>
               </div>
               <label class="volume-control" for="masterVolumeRange">
                 <span>Vol</span>
@@ -1483,10 +1492,11 @@
         <div class="layout">
           <section class="controls-stack">
             <div class="synth-chip-tabs" role="tablist" aria-label="Sound chip editor">
-              <button id="synthChipTabYm2612" class="toolbar-button is-selected" type="button" role="tab" data-synth-chip="ym2612" aria-selected="true" aria-controls="synthChipYm2612" tabindex="0">YM2612</button>
-              <button id="synthChipTabPsg" class="toolbar-button" type="button" role="tab" data-synth-chip="psg" aria-selected="false" aria-controls="synthChipPsg" tabindex="-1">PSG</button>
-              <button id="synthChipTabPcm" class="toolbar-button" type="button" role="tab" data-synth-chip="pcm" aria-selected="false" aria-controls="synthChipPcm" tabindex="-1">PCM</button>
-              <button id="synthChipTabPwm" class="toolbar-button" type="button" role="tab" data-synth-chip="pwm" aria-selected="false" aria-controls="synthChipPwm" tabindex="-1">PWM</button>
+                <button id="synthChipTabYm2612" class="toolbar-button is-selected" type="button" role="tab" data-synth-chip="ym2612" aria-selected="true" aria-controls="synthChipYm2612" tabindex="0">YM2612</button>
+                <button id="synthChipTabPsg" class="toolbar-button" type="button" role="tab" data-synth-chip="psg" aria-selected="false" aria-controls="synthChipPsg" tabindex="-1">PSG</button>
+                <button id="synthChipTabPcm" class="toolbar-button" type="button" role="tab" data-synth-chip="pcm" aria-selected="false" aria-controls="synthChipPcm" tabindex="-1">RF5C164</button>
+                <button id="synthChipTabPwm" class="toolbar-button" type="button" role="tab" data-synth-chip="pwm" aria-selected="false" aria-controls="synthChipPwm" tabindex="-1">32X PWM</button>
+                <button id="synthSongMixButton" class="toolbar-button" type="button" role="tab" data-synth-chip="mixer" aria-selected="false" aria-controls="synthChipMixer" tabindex="-1" title="Shared chip volumes and channel On / Off for Keyboard, Code and VGM.">Mixer</button>
             </div>
             <div id="synthChipYm2612" class="synth-chip-panel" role="tabpanel" aria-labelledby="synthChipTabYm2612">
             <div class="card visual-card">
@@ -1644,6 +1654,10 @@
                   <button type="button" class="toolbar-button is-selected" data-pcm-visual-mode="sample" aria-pressed="true">Sample</button>
                   <button type="button" class="toolbar-button" data-pcm-visual-mode="waveform" aria-pressed="false">Waveform</button>
                   <button type="button" class="toolbar-button" data-pcm-visual-mode="spectrum" aria-pressed="false">Spectrum</button>
+                  <span id="synthPcmEditModeControls" class="synth-pcm-edit-modes" role="group" aria-label="PCM sample editing mode">
+                    <span>Edit</span><button type="button" class="toolbar-button is-selected" data-pcm-edit-mode="range" aria-pressed="true">Range</button>
+                    <button type="button" class="toolbar-button" data-pcm-edit-mode="draw" aria-pressed="false">Draw</button>
+                  </span>
                 </div>
                 <p id="synthPcmVisualizerDescription" class="synth-psg-description">Sample view · drag L / E to set loop start / end.</p>
                 <canvas id="synthPcmCanvas" class="synth-psg-canvas" width="720" height="160" role="img" aria-label="PCM sample and loop range"></canvas>
@@ -1657,6 +1671,7 @@
                     <p>Software release smoothing lowers only the released voice's Volume over 4 ms before stopping it. This is a Synth software feature, shared by keyboard audition, Event Rec and Looper; the RF5C164 has no hardware ADSR envelope. Held voices keep their original sound. Stop and sample changes stop voices immediately.</p>
                     <p>WAV decoding, mono mixing and 8-bit conversion are software operations. Long samples are resampled to fit RAM, preserving duration with reduced bandwidth. Guard bytes reserve safe loop / stop markers.</p>
                     <p>Root note plays at the original sample speed. Loop Start and End can change while notes are held. End moves a marker in shared RAM without restarting the voices. Changing the sample stops held notes. Loop Off plays once and then loops silence; extending End can expose more audio to a held voice.</p>
+                    <p>Sample view starts in Range mode. Choose Draw to paint the source waveform on the same canvas. This is software PCM editing: a stroke previews while dragging and applies when released, stopping held notes. Escape, pointer cancellation or leaving the editor discards the unfinished stroke. Drawing keeps the sample length, rate, Root and Loop settings; save it with the existing PCM preset or Files / Cassette controls. Waveform and Spectrum show output only; VGM Live is read-only.</p>
                     <p>VGM Live shows the selected PCM channel's written settings and sample RAM at the audible position. Pause to play that sample on the selected channel; Copy creates a new Synth instrument. C4 is the captured playback speed, not an inferred original note. A snapshot cannot preserve later RAM edits or a game's software envelope.</p>
                     <p>Wrapped samples, unknown RAM or unsafe end markers cannot be copied or auditioned.</p>
                     <p>Software Event Rec records notes, Pitch, PCM settings and sample changes into self-contained JSON. Start Event Rec, then use Record / Stop or Space. Stopping a take starts loop playback on a separate PCM chip. Use current sound captures your current sample and settings when playback starts; later edits do not change that playback. Original note and stop timing is retained. Export / import takes from Menu.</p>
@@ -1684,6 +1699,16 @@
               <h2>32X PWM</h2><p>Under construction</p>
               <p class="subtext">Editor preview · Keyboard plays YM2612.</p>
             </div>
+            <div id="synthChipMixer" class="synth-chip-panel" role="tabpanel" aria-labelledby="synthSongMixButton" hidden>
+              <div id="synthSongMixPanel" role="group" aria-label="Sound chip mixer">
+                <div class="synth-song-mix-heading"><strong>Mixer</strong><output id="synthSongMixChannelStatus" aria-live="polite"></output><button id="synthSongMixReset" class="toolbar-button" type="button" title="Restore shared System levels and turn all channels on.">Reset</button></div>
+                <div id="synthSongMixReferenceOptions" hidden>
+                  <label class="synth-song-display-option" title="Briefly highlight changed Live values. Turn off to reduce visual updates."><input id="synthSongHighlightToggle" type="checkbox" checked>Live highlight</label>
+                  <label class="synth-song-display-option"><input id="synthSongSeekCacheToggle" type="checkbox" checked>Seek cache</label>
+                </div>
+                <div id="synthSongMixChannels"></div>
+              </div>
+            </div>
             <div class="looper-row">
               <button id="looperStartButton" class="toolbar-button" type="button">Looper Start</button>
               <button id="looperRecordButton" class="toolbar-button" type="button" hidden>Record</button>
@@ -1704,9 +1729,15 @@
             <div class="status" id="status">Press any key or click a pad to start audio.</div>
 
             <div class="control-section" id="synthInputSection">
-              <div class="synth-chip-tabs synth-input-tabs" role="tablist" aria-label="Performance input">
-                <button id="synthInputKeyboardTab" class="toolbar-button" type="button" role="tab" aria-selected="true" aria-controls="synthKeyboardPanel">Keyboard</button>
-                <button id="synthInputCodeTab" class="toolbar-button" type="button" role="tab" aria-selected="false" aria-controls="synthCodePanel" tabindex="-1">Code</button>
+              <div class="synth-input-heading">
+                <div class="synth-chip-tabs synth-input-tabs" role="tablist" aria-label="Performance input">
+                  <button id="synthInputKeyboardTab" class="toolbar-button" type="button" role="tab" aria-selected="true" aria-controls="synthKeyboardPanel">Keyboard</button>
+                  <button id="synthInputCodeTab" class="toolbar-button" type="button" role="tab" aria-selected="false" aria-controls="synthCodePanel" tabindex="-1">Code</button>
+                </div>
+                <button id="synthCodeMixerButton" class="toolbar-button" type="button" aria-controls="synthChipMixer" title="Restore this view and open the Mixer tab without stopping Code.">Mixer</button>
+                <button id="synthCodeExpandButton" class="toolbar-button" type="button" aria-label="Maximize Code" title="Maximize Code beside Files" aria-pressed="false" aria-controls="synthExpandedCodeSlot" hidden>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path id="synthCodeExpandIcon" d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"/></svg>
+                </button>
               </div>
               <div id="synthKeyboardPanel" role="tabpanel" aria-labelledby="synthInputKeyboardTab">
               <div class="fretboard-toolbar">
@@ -1769,6 +1800,7 @@
 
         </div>
           </div>
+          <div id="synthExpandedCodeSlot" hidden></div>
         </div>
       </section>
     </main>
@@ -1788,7 +1820,7 @@
     </div>
 
     <script type="module">
-      import "./synth.js?v=synth-code-2";
+      import "./synth.js?v=pcm-wave-draw-1";
     </script>
   </body>
 </html>
