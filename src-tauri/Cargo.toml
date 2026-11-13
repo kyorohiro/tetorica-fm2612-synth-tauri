@@ -1,6 +1,6 @@
 [package]
 name = "tetorica-fm2612-synth-tauri"
-version = "0.99.92"
+version = "0.99.94"
 edition = "2021"
 
 [build-dependencies]

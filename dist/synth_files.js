@@ -1,5 +1,5 @@
 import {renderFileTree} from './playground/playground_file_tree.js';
-import {createSynthProject,isSynthTonePath,isSynthStatePath,isPsgPresetPath,isPcmPresetPath} from './synth_project.js?v=pcm-live-draw-1';
+import {createSynthProject,isSynthTonePath,isSynthStatePath,isPsgPresetPath,isPcmPresetPath} from './synth_project.js?v=channel-presets-1';
 import {isPsgPreset} from './synth_psg_preset.js?v=psg-envelope-1';
 import {isPcmPreset} from './synth_pcm.js?v=pcm-live-draw-1';
 import {isCheckpointPath} from './js/tetorica_virtual_files/filesystem.js';
@@ -29,7 +29,7 @@ async function openDraftStore() {
 }
 
 export function setupSynthFiles({project,getPreset,getPresetId,applyPreset,applySnapshot,onSaved,onListChanged,onWorkspaceReplaced,
-  getEditorKind=()=> 'fm',setEditorKind=()=>{},getDefaultPresetId=()=> 'one-op-basic',isObserving=()=>false,
+  getEditorKind=()=> 'fm',setEditorKind=()=>{},getDefaultPresetId=()=> 'one-op-basic',getPresetKind=()=>null,isObserving=()=>false,
   canEditObservation=()=>false,canEditPsgObservation=()=>false,canEditPcmObservation=()=>false,canLoadWhileObserving=()=>false,isChipModeLocked=()=>false,stopAllNotes,setStatus}) {
   const byId = id => document.getElementById(id);
   const panel = byId('synthFilesPanel'), tree = byId('synthFilesTree');
@@ -386,7 +386,7 @@ export function setupSynthFiles({project,getPreset,getPresetId,applyPreset,apply
     busy=true;updateButtons();
     try {
       if (!await flushEdits()) return false;
-      const kind=['pcm','psg'].find(candidate=>id===getDefaultPresetId(candidate)&&id!==getDefaultPresetId('fm'))??'fm';
+      const kind=validKind(getPresetKind(id)??['pcm','psg'].find(candidate=>id===getDefaultPresetId(candidate)&&id!==getDefaultPresetId('fm'))??'fm');
       activateEditor(kind,false);
       activeTonePath = null; dirty = false;
       stopAllNotes();applyPreset(id);setBaseline();render();await remember(true);return true;
@@ -418,6 +418,28 @@ export function setupSynthFiles({project,getPreset,getPresetId,applyPreset,apply
       setBaseline();protectCurrentTone();reveal(tone.path);render();
       await remember(true);
       setStatus(`Copied to ${tone.path}. Edit the sound or Sync to keep a checkpoint.`);
+      return true;
+    } catch(error) {report(error);return false;}
+    finally {busy=false;updateButtons();}
+  }
+  // Save a detached CH snapshot while the current editor and performance keep
+  // running. Unlike Copy from a paused VGM, this never loads the new sound.
+  async function saveFromPreset(preset,name) {
+    if(busy)return false;
+    busy=true;updateButtons();
+    try {
+      const previous=capture();
+      // Encoding and validation finish synchronously, before any asynchronous
+      // draft write can observe later Code/register/RAM changes.
+      const tone=project.createTone(preset,name,{select:false});
+      pushUndo(previous);generation++;
+      reveal(tone.path);render();
+      try {
+        const durable=await remember(true);
+        setStatus(`Saved ${tone.path}. Current sound and performance kept.${durable?'':' Export Cassette to keep this project.'}`);
+      } catch(error) {
+        setStatus(`Saved ${tone.path} in Files. Local draft failed: ${error.message}. Export Cassette to keep this project.`);
+      }
       return true;
     } catch(error) {report(error);return false;}
     finally {busy=false;updateButtons();}
@@ -699,7 +721,7 @@ export function setupSynthFiles({project,getPreset,getPresetId,applyPreset,apply
     }catch(error){restoring=false;setStatus(`Local draft unavailable: ${error.message}. Cassette import/export is still available.`);}
     finally{draftLoaded=true;busy=false;if(dirty)persistCurrentTone();render();remember();}
   })();
-  return {ready,selectFile,selectPreset,switchEditor,importInstruments,createFromPreset,setVisible,isVisible:()=>!panel.hidden,
+  return {ready,selectFile,selectPreset,switchEditor,importInstruments,createFromPreset,saveFromPreset,setVisible,isVisible:()=>!panel.hidden,
     setCodeControls(controls){codeControls=controls;updateButtons();},
     getCodeState:()=>savedCodeState==null?null:structuredClone(savedCodeState),
     rememberCodeState(state){savedCodeState=structuredClone(state);updateButtons();remember();},
