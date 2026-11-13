@@ -24,7 +24,7 @@
     "generated/ym2608_wasm.wasm": "ab6be6d3fbcd49aeabff4f0cefa74ba31df8f310b5e44d3337853f18b488682f",
     "generated/ym2612_wasm.js": "f32abf7d979325d195d9fcf89c12bd69911db854576685e642cc0a73a46a4667",
     "generated/ym2612_wasm.wasm": "3ac5ce16924386956d23522bdc56c8e52fa67f7d15869bd616017d755993e633",
-    "index.html": "e73e1d36814fe539007706bdf17ac93a3113bfeb190ff703d432a0d2b95768d8",
+    "index.html": "a06b595c7ee6e8e612d8f5456719dd83fdfe020914a2e2185de0ca44a42ae80d",
     "js/adpcm_b_sample.js": "6cd2346c09713427384f14c152c03b2334928f10e618184a521790a7e9815f93",
     "js/audio_decode.js": "0f972b3983adb38f09e218cf4f1b1dc2fc5e840f0e3cf754c4bd2cd40083e9f4",
     "js/bitcrusher-worklet.js": "782a8c0f015770792f7226f3d6a874c23e067ecf8665337244baa5872b3d52d9",
@@ -212,7 +212,7 @@
     "sources/wasm/pwm32x_core.h": "5ad3e58e1d0133d676ffcc2e332840fb57f19d97cc52b6302b1914b084b8927c",
     "sources/wasm/pwm32x_wasm.cpp": "9ed05d4cab51ad0565d0a9f1da96e97e204007660482e567938f1c0f003d24bb",
     "sources/wasm/segapsg_wasm.cpp": "4ce18ea3f2167d6c0b81abc809948bd21f7a540fbe6aa50ef6f5db1961c97e8e",
-    "synth.js": "56fb4add47eb8f87c5793ed3170e24b2ae8aeab373550ff8652868ff91c77ba1",
+    "synth.js": "6bbe665f7bcc3b189c48d6184b4d1a3889a334059ae511035a1fb162af9acf4a",
     "synth_audio_loop_player.js": "f23b4e578c8d5b3e22f7812cbe1bfd285ec09aa01fb37004cb188513c2002f4b",
     "synth_code_audio.js": "e77c6dc5ff1db9bd87e001b555f4dca1aa388ca398bc9bc989a75212d59d6ad3",
     "synth_code_controls.js": "2482d3d2c5e9670bc1c324e2afe051c065476cff5543e5c7339d9f13d00f2675",
@@ -220,8 +220,9 @@
     "synth_code_output.js": "dca6ef03aca997f55fda55684fd6e0aa8dd8beb246c68a59ef8ac85efab4e112",
     "synth_code_project.js": "bf015d5805e6108638ca6a7c83b9e8c9628da42bd91ee03031bbc27c714c63e6",
     "synth_controls.js": "b272a8dc01c20abc6fa74c667b95846403777111102cd0a42e1154273756ea16",
+    "synth_draft_store.js": "e5425ddf930f0860531aa8566c6ed122577598447876c17b1ce10384f96335b6",
     "synth_envelope.js": "f392668d9114022e41f31be9b613737c09c51b78bb4ec48999eef4c565aa493d",
-    "synth_files.js": "2ea6d4a48dcc13554b79836b27ee2a7625e5cc76c5ffe5894abed54dece7b499",
+    "synth_files.js": "7a843728db8f0a27fcdeaf4847452c9adc084a20f7c722baaf1af9cd62de0c7a",
     "synth_fm_edits.js": "440653432662dea0ccdec694caf8a4a97e6f1e6c3cbe3f01ad8d7aa873a679d3",
     "synth_fm_mute.js": "00f12e6163da7a4829f1ac29941832692cced44e93b1ecc13b087165d352acb1",
     "synth_fm_worklet.js": "45776e136f8f9f3339c0d1435e73ec6385ebd0bc10032330e153f51728522073",
@@ -294,6 +295,6 @@
     "vgm_analyzer/seek_playback.js": "a1a784537804e2bc5d9a2aa86e4bd5b0675ad64501fd5b6b75ac10d7c930edbb",
     "vgm_analyzer/stored_zip.js": "dc4e7a8eda73cdc160b5a9493cadfd40d087158d4af9634bcc7cdd6811d2b968"
   },
-  "sha256": "724880bfecd56b890f61662b07574816619ffa284544145fce2c22da1f3334e0",
-  "version": "sha256-724880bfecd5"
+  "sha256": "ff8e4fcf7c0c8a7a764620b60afd9916946583fce6f0a1bcc7c6e4629469deff",
+  "version": "sha256-ff8e4fcf7c0c"
 }
