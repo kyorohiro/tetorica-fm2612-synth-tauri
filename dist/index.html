@@ -220,8 +220,8 @@
       @keyframes synth-live-change { from { background-color: #ffdb9788; color: #fff5c3; } }
       .param-value.is-live-changed { animation: synth-live-change 420ms ease-out; }
       @media (prefers-reduced-motion: reduce) { .param-value.is-live-changed { animation-duration: 1ms; } }
-      .synth-editor[data-live-view="true"] .param-value, .synth-editor[data-live-view="true"] .param-button { cursor: default; }
-      .synth-editor[data-live-view="true"] .operator-envelope-handle { visibility: hidden; }
+      .synth-editor[data-live-view="true"]:not([data-live-editable="true"]) .param-value, .synth-editor[data-live-view="true"]:not([data-live-editable="true"]) .param-button { cursor: default; }
+      .synth-editor[data-live-view="true"]:not([data-live-editable="true"]) .operator-envelope-handle { visibility: hidden; }
       .synth-file-dialog { max-width: min(430px, calc(100vw - 32px)); box-sizing: border-box; padding: 20px; color: #e4eee8; background: #172423; border: 1px solid #7c9d91; border-radius: 14px; }
       .synth-file-dialog::backdrop { background: #0009; }
       .synth-file-dialog h2 { margin-bottom: 12px; }
@@ -1474,14 +1474,14 @@
                 <span id="synthSongStatus" role="status">Stopped.</span>
                 <span class="synth-song-live-controls">
                   <label title="Automatically follow the song settings. Turn off to freeze the current view. Choose Synth to edit your instrument."><input id="synthSongLiveToggle" type="checkbox" checked>Live</label>
-                  <select id="synthSongChannelSelect" aria-label="View and keyboard sound" title="Synth: edit and play your sound. CH1–CH6: view that song channel; Pause to play its sound on the keyboard.">
+                  <select id="synthSongChannelSelect" aria-label="View, edit and keyboard channel" title="Synth: edit all FM channels. CH1–CH6: edit and play that song channel during playback. Pause for independent audition.">
                     <option value="synth">Synth</option>
                     <option value="0" selected>CH1</option><option value="1">CH2</option><option value="2">CH3</option>
                     <option value="3">CH4</option><option value="4">CH5</option><option value="5">CH6</option>
                   </select>
                   <button id="synthSongCopyButton" class="toolbar-button" type="button" aria-label="Copy selected channel to Synth" title="Pause to copy the selected FM channel into a new editable Synth instrument." disabled>Copy</button>
                 </span>
-                <output id="synthSongLiveStatus">Play, then Pause to play this CH · Synth to edit</output>
+                <output id="synthSongLiveStatus">Play to edit or play this FM CH · Pause for independent audition</output>
               </div>
               <label class="volume-control" for="masterVolumeRange">
                 <span>Vol</span>
@@ -1597,7 +1597,8 @@
                     <div class="synth-psg-help-body">
                       <p>Three hardware tone channels play fixed 50% duty square waves. New notes rotate through them. PSG has no hardware ADSR. Low notes clamp at the 10-bit tone-period limit.</p>
                       <p>Attenuation changes in 2 dB steps: 0 is loudest, 15 is silent. Master volume is shared with the other editors.</p>
-                      <p>Noise has one channel. Clock / 512, / 1024 and / 2048 use fixed clocks; keys retrigger the noise without changing its pitch. Tone 3 links its clock to the keyboard and Pitch. The Tone 3 square-wave output stays silent.</p>
+                      <p>Noise has one channel. Clock / 512, / 1024 and / 2048 use fixed clocks; keys retrigger the noise without changing its pitch. Tone 3 links its clock to the keyboard and Pitch. The author's Noise instrument keeps Tone 3 silent; live VGM input preserves its current level because the song may also use that square wave.</p>
+                      <p>During VGM playback, select Tone 1–3 or Noise above to edit and play that physical channel. Later song writes take over. Period is a hardware code: 0–1 gives constant tone output; a higher value gives a lower pitch. Noise's Tone 3 period also changes the audible Tone 3 oscillator. Pause keeps the independent frozen audition.</p>
                       <p>Software Envelope is an added software feature, not a hardware PSG envelope. It moves each voice's real attenuation in 2 dB steps. Attack, Decay and Release are milliseconds; Sustain is a level percentage. ADSR edits apply to new notes. Changing On / Off stops held notes and release tails.</p>
                     </div>
                   </details>
@@ -1613,6 +1614,11 @@
                   <span class="synth-psg-label">Attenuation</span>
                   <div id="synthPsgAttenuationControl"></div>
                   <span class="synth-psg-scale">0 loudest · 15 silent</span>
+                </div>
+                <div id="synthPsgPeriodRow" class="synth-psg-row" hidden>
+                  <span class="synth-psg-label" data-psg-period-label>Period</span>
+                  <div id="synthPsgPeriodControl"></div>
+                  <span class="synth-psg-scale">Hardware code · 0–1023</span>
                 </div>
                 <div id="synthPsgNoiseControls" class="synth-psg-noise" hidden>
                   <div class="synth-psg-row">
@@ -1668,12 +1674,12 @@
                   <div><h2>Mega CD PCM</h2><p class="synth-psg-session">RF5C164 · 8 voices · shared 64 KiB RAM</p></div>
                   <details id="synthPcmHelp" class="synth-psg-help"><summary aria-label="About Mega CD PCM" title="About Mega CD PCM">?</summary><div class="synth-psg-help-body">
                     <p>In Synth mode, eight PCM voices share one sample in 64 KiB RAM. Volume is 8-bit; left and right Pan each have 16 levels. New keys use round robin.</p>
-                    <p>Software release smoothing lowers only the released voice's Volume over 4 ms before stopping it. This is a Synth software feature, shared by keyboard audition, Event Rec and Looper; the RF5C164 has no hardware ADSR envelope. Held voices keep their original sound. Stop and sample changes stop voices immediately.</p>
+                    <p>Author Synth and paused audition use software release smoothing: only the released voice's Volume falls over 4 ms before stopping. Event Rec and Looper share this feature; RF5C164 has no hardware ADSR. Playing song channels use hardware Key Off. Stop and sample changes stop author voices immediately.</p>
                     <p>WAV decoding, mono mixing and 8-bit conversion are software operations. Long samples are resampled to fit RAM, preserving duration with reduced bandwidth. Guard bytes reserve safe loop / stop markers.</p>
                     <p>Root note plays at the original sample speed. Loop Start and End can change while notes are held. End moves a marker in shared RAM without restarting the voices. Changing the sample stops held notes. Loop Off plays once and then loops silence; extending End can expose more audio to a held voice.</p>
-                    <p>Sample view starts in Range mode. Choose Draw to paint the source waveform on the same canvas. This is software PCM editing: a stroke previews while dragging and applies when released, stopping held notes. Escape, pointer cancellation or leaving the editor discards the unfinished stroke. Drawing keeps the sample length, rate, Root and Loop settings; save it with the existing PCM preset or Files / Cassette controls. Waveform and Spectrum show output only; VGM Live is read-only.</p>
-                    <p>VGM Live shows the selected PCM channel's written settings and sample RAM at the audible position. Pause to play that sample on the selected channel; Copy creates a new Synth instrument. C4 is the captured playback speed, not an inferred original note. A snapshot cannot preserve later RAM edits or a game's software envelope.</p>
-                    <p>Wrapped samples, unknown RAM or unsafe end markers cannot be copied or auditioned.</p>
+                    <p>Sample view starts in Range mode. Choose Draw to paint the author's source waveform on the same canvas. This is software PCM editing: a stroke previews while dragging and applies on release while held notes keep playing. Escape, pointer cancellation or leaving the editor discards the stroke. Drawing keeps sample length, rate, Root and Loop settings; Files / Cassette keep the result.</p>
+                    <p>During VGM playback, PCM CH1–8 selects the same physical channel for viewing, Volume, Pan, Step and keyboard input. C4 uses the recorded Step as its reference speed, not an inferred original note; a Step edit changes that reference. Later VGM writes take over. The player's CH / RAM-bank selection and other voices are preserved. Sample, Root and Loop editing stay in author Synth. Waveform and Spectrum remain available while inspecting a song.</p>
+                    <p>Synth uses your separate author sample bank and keyboard. Loading a preset or sample keeps the song running and switches to Synth; it does not overwrite song RAM. Pause retains the independent captured audition, and Copy creates an author instrument. Wrapped or disjoint samples can play on the original chip when RAM is known, while Pause audition / Copy require a bounded contiguous sample and safe end markers. Globally disabled PCM, Step 0 or incomplete sample RAM show a keyboard-unavailable reason.</p>
                     <p>Software Event Rec records notes, Pitch, PCM settings and sample changes into self-contained JSON. Start Event Rec, then use Record / Stop or Space. Stopping a take starts loop playback on a separate PCM chip. Use current sound captures your current sample and settings when playback starts; later edits do not change that playback. Original note and stop timing is retained. Export / import takes from Menu.</p>
                     <p>Software Looper adds independent recorded layers. Start Looper, then Record / Stop or Space; the first take sets the period. Later takes join at their recorded position. Each layer keeps its samples and settings when you edit the Synth. Undo removes the latest layer; Stop / Start keeps layers, while Clear removes them. Up to 16 layers / 120 seconds / 128 MiB of rendered audio stay in this session's memory; they are not saved in Cassette. Layer mixing is software, beyond one chip's eight voices.</p>
                   </div></details>
@@ -1689,7 +1695,7 @@
                   <div class="synth-pcm-field"><span>Pan left · 0–15</span><div id="synthPcmPanLeftControl"></div></div>
                   <div class="synth-pcm-field"><span>Pan right · 0–15</span><div id="synthPcmPanRightControl"></div></div>
                   <div id="synthPcmRootField" class="synth-pcm-field"><span>Root note · <span id="synthPcmRootName">C4</span></span><div id="synthPcmRootNoteControl"></div></div>
-                  <div id="synthPcmStepField" class="synth-pcm-field" hidden><span>Playback step · hardware</span><output id="synthPcmStep" class="synth-pcm-step">0</output></div>
+                  <div id="synthPcmStepField" class="synth-pcm-field" hidden><span>Playback step · hardware</span><div id="synthPcmStepControl"></div></div>
                 </div>
                 <div class="synth-psg-row"><span class="synth-psg-label">Loop</span><button id="synthPcmLoopEnabled" type="button" class="toolbar-button" aria-pressed="true">On</button></div>
                 <div class="synth-pcm-fields"><div class="synth-pcm-field"><span id="synthPcmLoopStartLabel">Loop Start · frame</span><div id="synthPcmLoopStartControl"></div></div><div class="synth-pcm-field"><span id="synthPcmLoopEndLabel">Loop End · exclusive frame</span><div id="synthPcmLoopEndControl"></div></div></div>
@@ -1820,7 +1826,7 @@
     </div>
 
     <script type="module">
-      import "./synth.js?v=pcm-wave-draw-1";
+      import "./synth.js?v=pcm-manual-1";
     </script>
   </body>
 </html>

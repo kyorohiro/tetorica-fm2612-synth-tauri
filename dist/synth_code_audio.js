@@ -8,7 +8,7 @@ import {decodeAudioBuffer} from './js/audio_decode.js';
 import {SEGAPSG_CLOCK} from './js/segapsg.js';
 import {noteToHz,opnPitchFromHz} from './js/soundchip_pitch.js';
 import {rf5c164MidiNote,rf5c164NoteStep} from './js/rf5c164_notes.js?v=shared-notes-1';
-import {PCM_NATIVE_RATE} from './synth_pcm.js?v=pcm-release-1';
+import {PCM_NATIVE_RATE} from './synth_pcm.js?v=pcm-live-draw-1';
 import {SYNTH_SONG_MIX_DEFAULTS} from './synth_song_mix_defaults.js?v=mix-source-1';
 import {createSynthPerformanceTarget,normalizeCapturedVoice} from './synth_performance.js?v=op-gates-1';
 
@@ -44,17 +44,47 @@ function createPwmStereoGate(context,output,{muted}) {
  * inserts FX exactly once and restores that same direct edge when stopped.
  */
 export function createSynthCodeAudio({ensureChip=async()=>{},getContext,getInput,getOutput,getFm,getPsg,getPsgVoice,
-  getPcm,getPcmVoice,getFmVoice=()=>null,getMaster=()=>1,onLog=()=>{},createFxRack=createNativeFXRack,
+  getPcm,getPcmVoice,getFmVoice=()=>null,getMaster=()=>1,onLog=()=>{},onCodeGate=()=>{},createFxRack=createNativeFXRack,
   createPwmDevice=createPWM32XAudio,createPwmClient=createPWM32XClient,createPwmGate=createPwmStereoGate}={}) {
   for(const value of [ensureChip,getContext,getInput,getOutput,getFm,getPsg,getPsgVoice,getPcm,getPcmVoice,getFmVoice,getMaster,onLog,createFxRack,createPwmDevice,createPwmClient,createPwmGate]) {
     if(typeof value!=='function')throw TypeError('Code audio requires host callbacks');
   }
   let epoch=0,disposed=false,fxOwner=null,pwmOwner=null,pcmSeeded=false,pcmMemoryChanged=false,pcmSelected=0,stopping=null;
-  let lastPcmSettings=null,lastPsgSettings=null,psgLatched=0,pcmSourceGeneration=0,pcmRootNote=null;
+  let lastPcmSettings=null,lastPsgSettings=null,psgNoise=null,psgSessionUsed=false,psgLatched=0,pcmSourceGeneration=0,pcmRootNote=null;
   let pwmSourceVolume=SYNTH_SONG_MIX_DEFAULTS.pwm,pwmMaster=null;
   const pwmChannelMutes=[false,false];
   const clients=new Map(),fmActive=new Set(),psgActive=new Map(),pcmChannels=new Map(),pcmActive=new Set(),pcmPending=new Map(),fxNames=new Set();
   const pcmCodeRootChannels=new Set();
+  const gates=new Map(),keyboardTargets=new WeakMap();
+  const gateKey=(chip,ch)=>`${chip}:${ch}`;
+  const claim=(chip,ch)=>{gates.set(gateKey(chip,ch),'code');onCodeGate(chip,ch);};
+  const canRelease=(chip,ch)=>gates.get(gateKey(chip,ch))!=='keyboard';
+  function keyboardTarget(chip,target){
+    if(!target)return null;
+    if(!keyboardTargets.has(target))keyboardTargets.set(target,new Proxy(target,{get(object,key){
+      if(key==='noteOn')return(ch,...args)=>{
+        if(chip==='ym2612'){
+          integer(ch,5,'FM channel');integer(args[0],7,'FM block');integer(args[1],2047,'FM fnum');
+          if(gates.get(gateKey(chip,ch))==='code')required(getFm,'FM').keyOff(ch);
+        }
+        const result=object.noteOn(ch,...args);
+        if(result!==null){gates.set(gateKey(chip,ch),'keyboard');if(chip==='rf5c164')rememberPcmKeyboard(object,ch,result,true);}
+        return result;
+      };
+      if(key==='noteOff')return(ch,...args)=>{
+        if(gates.get(gateKey(chip,ch))!=='keyboard')return false;
+        const result=object.noteOff(ch,...args);gates.delete(gateKey(chip,ch));return result;
+      };
+      if(key==='setFrequency')return(ch,...args)=>{
+        if(gates.get(gateKey(chip,ch))!=='keyboard')return false;
+        const result=object.setFrequency(ch,...args);
+        if(chip==='rf5c164')rememberPcmKeyboard(object,ch,result,false);
+        return result;
+      };
+      const value=object[key];return typeof value==='function'?value.bind(object):value;
+    }}));
+    return keyboardTargets.get(target);
+  }
   const check=token=>{if(disposed||token!==epoch)throw cancelled();};
   const required=(get,label)=>{const api=get();if(!api)throw Error(`${label} audio is not ready`);return api;};
   const settingsPsg=()=>required(getPsgVoice,'PSG').getSettings();
@@ -158,57 +188,90 @@ export function createSynthCodeAudio({ensureChip=async()=>{},getContext,getInput
     const settings=settingsPsg(),api=required(getPsg,'PSG');
     const level=options.attenuation===undefined&&options.volume===undefined?settings.attenuation:undefined;
     const period=api.tone(ch,{...options,...(level===undefined?{}:{attenuation:level})});
-    psgActive.set(ch,{source:'tone'});
+    claim('segapsg',ch);psgActive.set(ch,{source:'tone'});
     if(settings.envelope.enabled)api.envelopeNoteOn?.(ch,settings.envelope,level??settings.attenuation);
+    psgLatch(api,(ch<<1)|1);
     return period;
+  }
+  const noiseRates=['low','medium','high','tone3'];
+  function rememberPsgNoise(options={}) {
+    psgNoise={type:options.type??'white',rate:options.rate??'medium'};
+  }
+  function psgLatch(api,fallback=psgLatched) {
+    // High-level API calls also move the physical latch. Raw continuation data
+    // must use that cursor, rather than our last explicit Code .write latch.
+    const actual=api._getState?.().latched;
+    psgLatched=Number.isInteger(actual)&&actual>=0&&actual<=7?actual:fallback;
+    return psgLatched;
   }
   function psgOff(ch) {
     integer(ch,3,'PSG channel');const api=required(getPsg,'PSG'),settings=settingsPsg();
+    if(!canRelease('segapsg',ch)){psgActive.delete(ch);return false;}
     if(settings.envelope.enabled&&psgActive.has(ch))api.envelopeNoteOff?.(ch);
     else if(ch===3)api.noiseOff();else api.keyOff(ch);
+    psgLatch(api,(ch<<1)|1);
     psgActive.delete(ch);
   }
-  function stopPsg() {getPsg()?.allNotesOff();psgActive.clear();}
+  function stopPsg() {const api=getPsg();api?.allNotesOff();if(api)psgLatch(api,7);for(let ch=0;ch<4;ch++)claim('segapsg',ch);psgActive.clear();}
   const psgOverrides={tone:psgTone,noteOn:(ch,note)=>psgTone(ch,{note}),
     keyOn:ch=>{
       integer(ch,3,'PSG channel');const api=required(getPsg,'PSG'),settings=settingsPsg();
-      if(ch===3)api.setNoise({type:settings.noiseType,rate:settings.noiseRate});
+      if(ch===3){api.setNoise({type:settings.noiseType,rate:settings.noiseRate});rememberPsgNoise({type:settings.noiseType,rate:settings.noiseRate});}
       if(settings.envelope.enabled)api.envelopeNoteOn?.(ch,settings.envelope,settings.attenuation);
       else api.setAttenuation(ch,settings.attenuation);
-      psgActive.set(ch,{source:ch===3?'noise':'tone'});
+      psgLatch(api,(ch<<1)|1);
+      claim('segapsg',ch);psgActive.set(ch,{source:ch===3?'noise':'tone'});
     },
     off:psgOff,keyOff:psgOff,noteOff:psgOff,noiseOff:()=>psgOff(3),allNotesOff:stopPsg,dispose:stopPsg,
     noise(options={}) {
       const settings=settingsPsg(),api=required(getPsg,'PSG');
-      const value=api.noise({type:settings.noiseType,rate:settings.noiseRate,attenuation:settings.attenuation,...options});
-      psgActive.set(3,{source:'noise'});
+      const next={type:settings.noiseType,rate:settings.noiseRate,attenuation:settings.attenuation,...options};
+      const value=api.noise(next);rememberPsgNoise(next);psgLatch(api,7);
+      claim('segapsg',3);psgActive.set(3,{source:'noise'});
       if(settings.envelope.enabled)api.envelopeNoteOn?.(3,settings.envelope,settings.attenuation);
       return value;
     },
+    setNoise(options={}) {
+      const api=required(getPsg,'PSG'),result=api.setNoise(options);
+      rememberPsgNoise(options);psgLatch(api,6);return result;
+    },
     setAttenuation(ch,value) {
-      const result=required(getPsg,'PSG').setAttenuation(ch,value);
+      const api=required(getPsg,'PSG'),result=api.setAttenuation(ch,value);psgLatch(api,(ch<<1)|1);
       if(value<15)psgActive.set(ch,{source:ch===3?'noise':'tone'});else psgActive.delete(ch);
       return result;
     },
     write(value) {
-      const result=required(getPsg,'PSG').write(value);
-      if(value&128)psgLatched=value>>4&7;
-      if(psgLatched&1){const ch=psgLatched>>1;if((value&15)<15)psgActive.set(ch,{source:ch===3?'noise':'tone'});else psgActive.delete(ch);}
+      const api=required(getPsg,'PSG'),result=api.write(value);
+      psgLatch(api,value&128?value>>4&7:psgLatched);
+      if(psgLatched===6)rememberPsgNoise({type:value&4?'white':'periodic',rate:noiseRates[value&3]});
+      if(psgLatched&1){const ch=psgLatched>>1;claim('segapsg',ch);if((value&15)<15)psgActive.set(ch,{source:ch===3?'noise':'tone'});else psgActive.delete(ch);}
       return result;
     },
-    noiseVolume(value) {const result=required(getPsg,'PSG').noiseVolume(value);if(value>0)psgActive.set(3,{source:'noise'});else psgActive.delete(3);return result;},
-    reset:()=>{psgActive.clear();return required(getPsg,'PSG').reset();},
-    resetAll:()=>{psgActive.clear();return required(getPsg,'PSG').resetAll();},
+    noiseVolume(value) {const api=required(getPsg,'PSG'),result=api.noiseVolume(value);psgLatch(api,7);if(value>0)psgActive.set(3,{source:'noise'});else psgActive.delete(3);return result;},
+    reset:()=>{const result=required(getPsg,'PSG').reset();psgActive.clear();psgLatched=0;rememberPsgNoise({type:'periodic',rate:'low'});return result;},
+    resetAll:()=>{const result=required(getPsg,'PSG').resetAll();psgActive.clear();psgLatched=0;rememberPsgNoise({type:'periodic',rate:'low'});return result;},
   };
   function defaultPcmChannel() {
     const voice=required(getPcmVoice,'PCM'),preset=voice.getPreset(),s=preset.settings;
     return {start:0,loopStart:s.loopEnabled?s.loopStart:s.loopEnd+1,volume:s.volume,pan:{left:s.panLeft,right:s.panRight},
       step:clampStep(preset.sample.sampleRate/PCM_NATIVE_RATE*2048*2**((60-s.rootNote)/12))};
   }
+  function rememberPcmKeyboard(target,ch,result,triggered) {
+    if(!Number.isInteger(result?.step)||typeof target.getSettings!=='function')return;
+    const current=pcmChannels.get(ch)??defaultPcmChannel();
+    const changes={step:result.step};
+    if(triggered) {
+      const settings=target.getSettings();
+      Object.assign(changes,{start:0,loopStart:settings.loopEnabled?settings.loopStart:settings.loopEnd+1,
+        volume:settings.volume,pan:{left:settings.panLeft,right:settings.panRight}});
+    }
+    pcmChannels.set(ch,{...current,...changes});pcmSelected=ch;pcmCodeRootChannels.delete(ch);
+  }
   function writePcmChannel(ch,options) {
     integer(ch,7,'PCM channel');if(!object(options))throw TypeError('PCM channel settings must be an object');
     const api=required(getPcm,'PCM'),before=pcmChannels.get(ch)??defaultPcmChannel();
     api.setChannel(ch,options);
+    pcmSelected=ch;
     pcmChannels.set(ch,{...before,...options,pan:options.pan?{...options.pan}:{...before.pan}});
   }
   function setPcmChannel(ch,options) {
@@ -220,11 +283,11 @@ export function createSynthCodeAudio({ensureChip=async()=>{},getContext,getInput
     const api=required(getPcm,'PCM'),settings=defaultPcmChannel();
     for(let ch=0;ch<8;ch++) {
       const configured=pcmChannels.get(ch),next={...settings,...configured,pan:{...(configured?.pan??settings.pan)}};
-      api.setChannel(ch,next);pcmChannels.set(ch,next);
+      api.setChannel(ch,next);pcmSelected=ch;pcmChannels.set(ch,next);
     }
     lastPcmSettings=settingsPcm();pcmSeeded=true;
   }
-  function stopPcm() {pcmPending.clear();const pcm=getPcm();if(pcm)for(let ch=0;ch<8;ch++)pcm.keyOff(ch);pcmActive.clear();}
+  function stopPcm() {pcmPending.clear();const pcm=getPcm();if(pcm)for(let ch=0;ch<8;ch++){pcm.keyOff(ch);claim('rf5c164',ch);}pcmActive.clear();}
   function pcmSourceChanged() {
     // The author has already stopped these channels and selected a new bank.
     // Other Code chips and the shared effects keep their current performance.
@@ -232,8 +295,15 @@ export function createSynthCodeAudio({ensureChip=async()=>{},getContext,getInput
     pcmSeeded=false;pcmMemoryChanged=false;pcmSelected=0;
     lastPcmSettings=settingsPcm();
   }
+  function beforePcmSampleEdit() {
+    if(stopping)throw Error('Wait for Code to stop before drawing the editor sample.');
+    if(pcmMemoryChanged)throw Error('Stop Code before drawing the editor sample; Code owns different PCM RAM.');
+    // Cancel an old asynchronous loadSample decode, but keep current musical
+    // tuning, physical channels and pending/held note ownership intact.
+    pcmSourceGeneration++;
+  }
   function startPcm(ch) {
-    seedPcm();const value=required(getPcm,'PCM').keyOn(ch);pcmActive.add(ch);return value;
+    seedPcm();const value=required(getPcm,'PCM').keyOn(ch);pcmSelected=ch;claim('rf5c164',ch);pcmActive.add(ch);return value;
   }
   function keyOnPcm(ch,beforeStart) {
     integer(ch,7,'PCM channel');pcmPending.delete(ch);
@@ -284,7 +354,7 @@ export function createSynthCodeAudio({ensureChip=async()=>{},getContext,getInput
   const pcmOverrides={setChannel:setPcmChannel,setPitch:(ch,step)=>setPcmChannel(ch,{step}),
     setRootNote:setPcmRootNote,setNote:setNotePcm,noteOn:noteOnPcm,
     keyOn:keyOnPcm,
-    keyOff:ch=>{integer(ch,7,'PCM channel');pcmPending.delete(ch);const api=required(getPcm,'PCM');if(typeof api.releaseNote==='function')api.releaseNote(ch);else api.keyOff(ch);pcmActive.delete(ch);},
+    keyOff:ch=>{integer(ch,7,'PCM channel');pcmPending.delete(ch);if(!canRelease('rf5c164',ch)){pcmActive.delete(ch);return false;}const api=required(getPcm,'PCM');if(typeof api.releaseNote==='function')api.releaseNote(ch);else api.keyOff(ch);pcmActive.delete(ch);},
     noteOff:ch=>pcmOverrides.keyOff(ch),allNotesOff:stopPcm,dispose:stopPcm,
     async loadMemory(bytes,address=0) {const pending=required(getPcm,'PCM').loadMemory(sampleBytes(bytes),address);pcmMemoryChanged=true;return pending;},
     async loadSample(source,{address=0,loopStart,endGuardBytes=0}={}) {
@@ -314,28 +384,46 @@ export function createSynthCodeAudio({ensureChip=async()=>{},getContext,getInput
       if(register===1)state.pan={left:value&15,right:value>>4};
       if(register===2)state.step=(state.step&65280)|value;
       if(register===3)state.step=(state.step&255)|(value<<8);
+      if(register===4)state.loopStart=(state.loopStart&65280)|value;
+      if(register===5)state.loopStart=(state.loopStart&255)|(value<<8);
+      if(register===6)state.start=value<<8;
       if(register===2||register===3)pcmCodeRootChannels.delete(pcmSelected);
       pcmChannels.set(pcmSelected,state);
-      if(register===8)for(let ch=0;ch<8;ch++){if(value&(1<<ch))pcmActive.delete(ch);else pcmActive.add(ch);}
+      if(register===8)for(let ch=0;ch<8;ch++){claim('rf5c164',ch);if(value&(1<<ch))pcmActive.delete(ch);else pcmActive.add(ch);}
     },
-    reset() {stopPcm();pcmChannels.clear();pcmCodeRootChannels.clear();pcmSeeded=false;return required(getPcm,'PCM').reset();},
+    reset() {stopPcm();pcmChannels.clear();pcmCodeRootChannels.clear();pcmSeeded=false;pcmSelected=0;return required(getPcm,'PCM').reset();},
   };
-  function syncPsgSettings(previous=lastPsgSettings) {
+  function syncPsgSettings(previous=lastPsgSettings,patch) {
     const next=settingsPsg(),api=getPsg();lastPsgSettings=next;
     if(!api)return;
-    if(previous&&(previous.source!==next.source||previous.envelope.enabled!==next.envelope.enabled)){psgActive.clear();return;}
-    if(next.envelope.enabled)api.setEnvelopeAttenuation?.(next.attenuation);
-    else for(const ch of psgActive.keys())api.setAttenuation(ch,next.attenuation);
-    if(psgActive.has(3)&&(!previous||previous.noiseType!==next.noiseType||previous.noiseRate!==next.noiseRate))api.setNoise({type:next.noiseType,rate:next.noiseRate});
+    if(previous&&(previous.source!==next.source||previous.envelope.enabled!==next.envelope.enabled)){
+      psgActive.clear();rememberPsgNoise({type:next.noiseType,rate:next.noiseRate});return;
+    }
+    const changed=field=>patch?Object.hasOwn(patch,field):!previous||previous[field]!==next[field];
+    if(changed('attenuation')) {
+      if(next.envelope.enabled)api.setEnvelopeAttenuation?.(next.attenuation);
+      else for(const ch of psgActive.keys())api.setAttenuation(ch,next.attenuation);
+    }
+    if((psgActive.has(3)||psgNoise)&&(changed('noiseType')||changed('noiseRate'))) {
+      const current=psgNoise??{type:previous?.noiseType??next.noiseType,rate:previous?.noiseRate??next.noiseRate};
+      const settings={type:changed('noiseType')?next.noiseType:current.type,rate:changed('noiseRate')?next.noiseRate:current.rate};
+      api.setNoise(settings);rememberPsgNoise(settings);psgLatch(api,6);
+    }
   }
-  function syncPcmSettings(previous=lastPcmSettings) {
+  function syncPcmSettings(previous=lastPcmSettings,patch) {
     const next=settingsPcm(),api=getPcm();lastPcmSettings=next;
     if(!api||!pcmChannels.size)return;
+    const changed=field=>patch?Object.hasOwn(patch,field):!previous||previous[field]!==next[field];
     for(const ch of pcmChannels.keys()) {
       const current=pcmChannels.get(ch)??defaultPcmChannel();
-      writePcmChannel(ch,{volume:next.volume,pan:{left:next.panLeft,right:next.panRight},
-        loopStart:next.loopEnabled?next.loopStart:next.loopEnd+1,
-        step:previous&&!pcmCodeRootChannels.has(ch)?clampStep(current.step*2**((previous.rootNote-next.rootNote)/12)):current.step});
+      const changes={};
+      if(changed('volume'))changes.volume=next.volume;
+      if(changed('panLeft')||changed('panRight'))changes.pan={
+        left:changed('panLeft')?next.panLeft:current.pan.left,
+        right:changed('panRight')?next.panRight:current.pan.right};
+      if(changed('loopEnabled')||changed(next.loopEnabled?'loopStart':'loopEnd'))changes.loopStart=next.loopEnabled?next.loopStart:next.loopEnd+1;
+      if(changed('rootNote')&&previous&&!pcmCodeRootChannels.has(ch))changes.step=clampStep(current.step*2**((previous.rootNote-next.rootNote)/12));
+      if(Object.keys(changes).length)writePcmChannel(ch,changes);
     }
   }
   function fmVoice(ch) {
@@ -343,22 +431,32 @@ export function createSynthCodeAudio({ensureChip=async()=>{},getContext,getInput
     return voice?.specialMode&&ch!==2?{...voice,specialMode:false,specialFrequencies:[]}:voice;
   }
   const fmTarget=createSynthPerformanceTarget({getSynth:getFm});
-  function stopFm() {const fm=getFm();if(fm)for(let ch=0;ch<6;ch++)fm.keyOff(ch);fmActive.clear();}
+  function stopFm() {const fm=getFm();if(fm)for(let ch=0;ch<6;ch++){fm.keyOff(ch);claim('ym2612',ch);}fmActive.clear();}
   function noteOnFm(ch,noteOrBlock,fnum) {
     const voice=fmVoice(ch),raw=required(getFm,'FM');
     const pitch=fnum===undefined?opnPitchFromHz(noteToHz(noteOrBlock),raw.clock??7670454,144,{clamp:true}):{block:noteOrBlock,fnum};
-    const value=fmTarget.noteOn(ch,pitch.block,pitch.fnum,voice);fmActive.add(ch);return value;
+    const value=fmTarget.noteOn(ch,pitch.block,pitch.fnum,voice);claim('ym2612',ch);fmActive.add(ch);return value;
   }
   const fmOverrides={
+    write(port,register,value){
+      const result=required(getFm,'FM').write(port,register,value),encoded=value&7;
+      if(register===0x28&&port===0&&encoded!==3&&encoded!==7)claim('ym2612',encoded>=4?encoded-1:encoded);
+      return result;
+    },
+    rawWrite(port,register,value){
+      const result=required(getFm,'FM').rawWrite(port,register,value),encoded=value&7;
+      if(register===0x28&&port===0&&encoded!==3&&encoded!==7)claim('ym2612',encoded>=4?encoded-1:encoded);
+      return result;
+    },
     noteOn:noteOnFm,noteOnRaw:noteOnFm,
-    noteOff(ch) {const value=fmTarget.noteOff(ch,fmVoice(ch));fmActive.delete(ch);return value;},
+    noteOff(ch) {if(!canRelease('ym2612',ch)){fmActive.delete(ch);return false;}const value=fmTarget.noteOff(ch,fmVoice(ch));fmActive.delete(ch);return value;},
     keyOn(ch,operators) {
       const voice=fmVoice(ch),raw=required(getFm,'FM');
       const value=operators===undefined?fmTarget.setKeyMask(ch,voice):raw.keyOn(ch,operators);
-      fmActive.add(ch);return value;
+      claim('ym2612',ch);fmActive.add(ch);return value;
     },
     keyOff(ch,operators) {
-      integer(ch,5,'FM channel');const raw=required(getFm,'FM'),value=raw.keyOff(ch,operators);
+      integer(ch,5,'FM channel');if(!canRelease('ym2612',ch)){fmActive.delete(ch);return false;}const raw=required(getFm,'FM'),value=raw.keyOff(ch,operators);
       if(operators===undefined||!operators.length)fmActive.delete(ch);return value;
     },
     setFrequency(ch,block,fnum) {return fmTarget.setFrequency(ch,block,fnum,fmVoice(ch));},
@@ -370,7 +468,11 @@ export function createSynthCodeAudio({ensureChip=async()=>{},getContext,getInput
     if(!names.has(name))throw Error(`Synth Code supports ym2612, segapsg, rf5c164 and pwm; got ${String(name)}`);
     const token=epoch;check(token);if(stopping)await stopping;check(token);await ensureChip(name);check(token);
     if(name==='ym2612')return client(name,fmOverrides,getFm);
-    if(name==='segapsg'){lastPsgSettings=settingsPsg();return client(name,psgOverrides,getPsg);}
+    if(name==='segapsg'){
+      lastPsgSettings=settingsPsg();
+      if(!psgSessionUsed){rememberPsgNoise({type:lastPsgSettings.noiseType,rate:lastPsgSettings.noiseRate});psgSessionUsed=true;}
+      return client(name,psgOverrides,getPsg);
+    }
     if(name==='rf5c164'){seedPcm();return client(name,pcmOverrides,getPcm);}
     await preparePwm();check(token);return client(name,{dispose:()=>retirePwm(pwmOwner)},()=>pwmOwner?.api);
   }
@@ -378,6 +480,7 @@ export function createSynthCodeAudio({ensureChip=async()=>{},getContext,getInput
     if(stopping)return stopping;
     ++epoch;stopFm();
     stopPsg();stopPcm();retirePwm(pwmOwner);
+    psgNoise=null;psgSessionUsed=false;lastPsgSettings=null;
     fxNames.clear();
     if(fxOwner?.rack){fxOwner.rack.stop();fxOwner.rack.controller.dispose();restoreDirect(fxOwner);}
     else retireFx(fxOwner);
@@ -388,7 +491,7 @@ export function createSynthCodeAudio({ensureChip=async()=>{},getContext,getInput
     }).finally(()=>{if(stopping===task)stopping=null;});
     stopping=task;return task;
   }
-  return {prepare,useSoundChip,fx,getFm:()=>client('ym2612',fmOverrides,getFm),syncFmVoice,syncPsgSettings,syncPcmSettings,pcmSourceChanged,
+  return {prepare,useSoundChip,fx,keyboardTarget,getFm:()=>client('ym2612',fmOverrides,getFm),syncFmVoice,syncPsgSettings,syncPcmSettings,pcmSourceChanged,beforePcmSampleEdit,
     setMaster(value){
       if(typeof value!=='number'||!Number.isFinite(value)||value<0||value>3.8)throw RangeError('Code Master must be 0..3.8');
       pwmMaster=value;if(pwmOwner)pwmOwner.gain.gain.value=value*pwmSourceVolume;

@@ -80,6 +80,16 @@ export function normalizePcmPreset(value) {
   return {version:PCM_PRESET_VERSION,kind:PCM_PRESET_KIND,settings,sample:{...value.sample}};
 }
 
+/** A drawn edit changes amplitudes only; instrument replacement is separate. */
+export function normalizePcmSampleEdit(current,value) {
+  const previous=normalizePcmPreset(current),next=normalizePcmPreset(value);
+  if(pcmSampleBytes(previous.sample).length!==pcmSampleBytes(next.sample).length||
+    ['name','sampleRate','encoding'].some(field=>previous.sample[field]!==next.sample[field])||
+    settingFields.some(field=>previous.settings[field]!==next.settings[field]))
+    throw new TypeError('PCM drawing must preserve sample length, metadata and settings');
+  return next;
+}
+
 /** Build a strict self-contained instrument from a sample and partial settings. */
 export function createPcmPreset({sample,settings={}}={}) {
   if(sample===undefined) {
@@ -217,7 +227,16 @@ export function createSynthPcmVoice({getPcm,getPitchClock=()=>7670454,onState=()
       silence();current=next;frames=nextFrames;revision++;installed=null;installedRevision=-1;
       onCommand({type:'setPreset',preset:getPreset()});emit();return getPreset();
     },
-    setSettings(patch) {
+    editSample(value) {
+      const next=normalizePcmSampleEdit(current,value);
+      if(next.sample.data===current.sample.data)return false;
+      // Keep the installed endpoint and voice positions. install() transfers
+      // the new guarded bytes in FIFO order, just like a live End edit.
+      current=next;revision++;
+      onCommand({type:'editSample',preset:getPreset()});emit();return true;
+    },
+    setSettings(patch,{applyHardware=true}={}) {
+      if(typeof applyHardware!=='boolean')throw new TypeError('PCM applyHardware must be boolean');
       ownObject(patch,'PCM settings patch');
       const next=normalizePcmSettings({...current.settings,...patch},frames),previous=current.settings;
       if(settingFields.every(field=>next[field]===previous[field]))return getSettings();
@@ -226,7 +245,7 @@ export function createSynthPcmVoice({getPcm,getPitchClock=()=>7670454,onState=()
       const pcm=getPcm();
       if(pcm&&installed===pcm)for(const [ch,note] of held) {
         const changed=pitch(note.block,note.fnum);
-        pcm.setChannel(ch,{volume:next.volume,pan:{left:next.panLeft,right:next.panRight},loopStart:loopAddress(),step:changed.step});
+        if(applyHardware)pcm.setChannel(ch,{volume:next.volume,pan:{left:next.panLeft,right:next.panRight},loopStart:loopAddress(),step:changed.step});
         held.set(ch,{channel:ch,...changed});
       }
       onCommand({type:'setSettings',settings:getSettings()});emit();return getSettings();
@@ -243,6 +262,7 @@ export function createSynthPcmVoice({getPcm,getPitchClock=()=>7670454,onState=()
       if(typeof pcm?.releaseNote==='function')pcm.releaseNote(ch);else pcm?.keyOff(ch);
       held.delete(ch);onCommand({type:'noteOff',channel:ch});emit();return true;
     },
+    forgetNote(ch){channel(ch);const removed=held.delete(ch);if(removed)emit();return removed;},
     setFrequency(ch,block,fnum) {
       channel(ch);const note=pitch(block,fnum),pcm=getPcm();if(!pcm||installed!==pcm)return null;
       pcm.setPitch(ch,note.step);if(held.has(ch))held.set(ch,{channel:ch,...note});

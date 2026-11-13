@@ -1,9 +1,9 @@
 import {renderFileTree} from './playground/playground_file_tree.js';
-import {createSynthProject,isSynthTonePath,isSynthStatePath,isPsgPresetPath,isPcmPresetPath} from './synth_project.js?v=pcm-editor-1';
+import {createSynthProject,isSynthTonePath,isSynthStatePath,isPsgPresetPath,isPcmPresetPath} from './synth_project.js?v=pcm-live-draw-1';
 import {isPsgPreset} from './synth_psg_preset.js?v=psg-envelope-1';
-import {isPcmPreset} from './synth_pcm.js?v=pcm-editor-1';
+import {isPcmPreset} from './synth_pcm.js?v=pcm-live-draw-1';
 import {isCheckpointPath} from './js/tetorica_virtual_files/filesystem.js';
-import {createToneRecovery, parseToneRecovery} from './synth_recovery.js?v=pcm-editor-1';
+import {createToneRecovery, parseToneRecovery} from './synth_recovery.js?v=pcm-live-draw-1';
 
 const basename = path => path.split('/').pop();
 const dirname = path => path.slice(0, path.lastIndexOf('/')) || '/';
@@ -29,7 +29,8 @@ async function openDraftStore() {
 }
 
 export function setupSynthFiles({project,getPreset,getPresetId,applyPreset,applySnapshot,onSaved,onListChanged,onWorkspaceReplaced,
-  getEditorKind=()=> 'fm',setEditorKind=()=>{},getDefaultPresetId=()=> 'one-op-basic',isObserving=()=>false,stopAllNotes,setStatus}) {
+  getEditorKind=()=> 'fm',setEditorKind=()=>{},getDefaultPresetId=()=> 'one-op-basic',isObserving=()=>false,
+  canEditObservation=()=>false,canEditPsgObservation=()=>false,canEditPcmObservation=()=>false,canLoadWhileObserving=()=>false,isChipModeLocked=()=>false,stopAllNotes,setStatus}) {
   const byId = id => document.getElementById(id);
   const panel = byId('synthFilesPanel'), tree = byId('synthFilesTree');
   const toggle = byId('synthFilesToggle'), workspace = byId('synthWorkspace');
@@ -186,13 +187,14 @@ export function setupSynthFiles({project,getPreset,getPresetId,applyPreset,apply
     byId('synthActiveFilePath').textContent = !draftLoaded ? 'Restoring local project…' : editingCode?(codeControls.activePath||'Code'):activeTonePath || 'Built-in instrument';
     byId('synthFileUndoButton').disabled = busy || !history.length;
     document.querySelector('.synth-editor').setAttribute('aria-busy', String(busy));
-    for (const id of ['commonControls','operatorControls','channel3SpecialControls']) byId(id).inert = busy || readOnly;
-    if(byId('synthPsgSettings'))byId('synthPsgSettings').inert=busy||readOnly;
-    if(byId('synthPsgPresetSelect'))byId('synthPsgPresetSelect').disabled=busy||readOnly;
-    if(byId('synthPcmSettings'))byId('synthPcmSettings').inert=busy||readOnly;
+    for (const id of ['commonControls','operatorControls']) byId(id).inert = busy || readOnly&&!canEditObservation();
+    byId('channel3SpecialControls').inert=busy||readOnly||isChipModeLocked();
+    if(byId('synthPsgSettings'))byId('synthPsgSettings').inert=busy||readOnly&&!canEditPsgObservation();
+    if(byId('synthPsgPresetSelect'))byId('synthPsgPresetSelect').disabled=busy||readOnly&&!canLoadWhileObserving();
+    if(byId('synthPcmSettings'))byId('synthPcmSettings').inert=busy||readOnly&&!canEditPcmObservation();
     if(byId('synthPcmCanvas'))byId('synthPcmCanvas').inert=busy||readOnly;
     if(byId('synthPcmEditModeControls'))byId('synthPcmEditModeControls').inert=busy||readOnly;
-    if(byId('synthPcmPresetSelect'))byId('synthPcmPresetSelect').disabled=busy||readOnly;
+    if(byId('synthPcmPresetSelect'))byId('synthPcmPresetSelect').disabled=busy||readOnly&&!canLoadWhileObserving();
     for (const id of ['synthFileDuplicateButton','synthFileRenameButton','synthFileDeleteButton']) {
       byId(id).disabled = busy || !selectedPath || selectedPath === '/';
     }
@@ -202,7 +204,7 @@ export function setupSynthFiles({project,getPreset,getPresetId,applyPreset,apply
     byId('importPresetButton').disabled=busy;
     byId('importCassetteButton').disabled=busy;
     byId('exportCassetteButton').disabled=busy;
-    byId('presetSelect').disabled=busy||readOnly;
+    byId('presetSelect').disabled=busy||readOnly&&!canLoadWhileObserving();
     codeControls?.setBusy?.(busy);
   }
   function updateVisibility() {
@@ -357,12 +359,12 @@ export function setupSynthFiles({project,getPreset,getPresetId,applyPreset,apply
     try {
       // Validate before switching, so a bad file never changes the sound.
       const tone = isSynthTonePath(path) ? project.readTone(path) : null;
-      if (tone && isObserving()) {setStatus('Choose Synth to edit an instrument.'); return false;}
+      if (tone && isObserving()&&!canLoadWhileObserving()) {setStatus('Choose Synth to edit an instrument.'); return false;}
       if (tone && path !== activeTonePath && !await flushEdits()) return false;
       selectedPath = path;
       project.select(path);
       if(isCodePath(path))await codeControls?.openFile?.(path);
-      if (tone && path !== activeTonePath) {
+      if (tone && (path !== activeTonePath||canLoadWhileObserving())) {
         stopAllNotes();
         activateEditor(kindOfPreset(tone.preset),false);
         activeTonePath = path;
@@ -377,7 +379,7 @@ export function setupSynthFiles({project,getPreset,getPresetId,applyPreset,apply
     finally {busy=false;updateButtons();}
   }
   async function selectPreset(id) {
-    if (isObserving()) {setStatus('Choose Synth to edit an instrument.'); return false;}
+    if (isObserving()&&!canLoadWhileObserving()) {setStatus('Choose Synth to edit an instrument.'); return false;}
     if (id.startsWith('vfs:')) return selectFile(id.slice(4));
     if (id === 'custom') return true;
     if (busy) return false;
