@@ -9,6 +9,11 @@ export function definitionSource(text, position, chip = 'ym2612', options = {}) 
   const prefix = lines.slice(0, position?.startLineNumber ?? position?.lineNumber ?? 1).join('\n');
   const owners = [...prefix.matchAll(/^(?:declare\s+)?(?:interface|type)\s+(\w+)/gm)];
   const owner = owners.at(-1)?.[1] ?? '';
+  // Member names such as play/stop belong to their declared media interface,
+  // before similarly named global music helpers are considered.
+  if(owner==='PlaygroundMsm5205API')return {file:'msm5205_player.js',symbol};
+  if(owner==='PlaygroundCddaAPI')return {file:'cdda_player.js',symbol};
+  if(/^Huc6280Code(?:Msm5205|Cdda)$/.test(owner)&&symbol==='dispose')return {file:'synth-huc6280/cdrom2_audio.js',symbol:'createHuc6280Cdrom2Audio'};
   if(options.runtimeFile) {
     const runtime=['useSoundChip','setBpm','beat','nextBeat','sleep','sleepSamples','tween','liveLoop','livePrepare','liveFx',
       'stopLoop','stopAllLoops','liveCleanup','trackAsync','file','log','console'];
@@ -42,6 +47,10 @@ export function definitionSource(text, position, chip = 'ym2612', options = {}) 
   if (/^Playground(?:Primary)?Ps1/.test(owner)||owner==='SpuCodeClient') return {file:'ps1synth.js',symbol:/^(?:Playground|SpuCodeClient)/.test(symbol)?'Ps1Synth':symbol};
   if (/^PlaygroundNes$/.test(owner)) return {file:'nesapusynth.js', symbol};
   if (/^PlaygroundGameboy$/.test(owner)) return {file:'gameboysynth.js', symbol};
+  if(owner==='Huc6280CodeClient'&&['getState','noteOn','noteOff','dispose'].includes(symbol))
+    return {file:'synth-huc6280/instrument.js',symbol:{getState:'observeCode',noteOn:'_liveNoteOn',noteOff:'noteOff',dispose:'stop'}[symbol]};
+  if(/^Playground(?:Primary)?Huc6280/.test(owner)||owner==='Huc6280CodeClient')
+    return {file:'huc6280synth.js',symbol:/^(?:Playground|Huc6280CodeClient)/.test(symbol)?'Huc6280Synth':symbol};
   if (/^PlaygroundYm2151$/.test(owner)) return {file:'playground_ym2151.js', symbol};
   if (/^PlaygroundDx7$/.test(owner)) return {file:'playground_dx7.js', symbol};
   if (/^PlaygroundSnes$/.test(owner)) return {file:'playground_snes.js', symbol};
@@ -76,6 +85,13 @@ export function sourcePosition(text, symbol) {
   const index = match.index + match[0].indexOf(symbol);
   const prefix = text.slice(0,index);
   return {lineNumber:prefix.split('\n').length, column:index - prefix.lastIndexOf('\n')};
+}
+
+/** Native API basenames live in js/. Namespaced application implementations
+ * retain their authored layout, so relative source imports remain navigable. */
+export function runtimeSourceUrl(file,base=import.meta.url) {
+  if(typeof file!=='string'||!file.endsWith('.js')||!file.split('/').every(part=>/^[\w.-]+$/.test(part)&&part!=='.'&&part!=='..'))throw new TypeError('Invalid implementation source path');
+  return new URL(file.includes('/')?`../${file}`:`../js/${file}`,base);
 }
 
 /** Locate the module needed to resolve an imported identifier without loading the whole runtime. */
@@ -152,7 +168,7 @@ export function createDefinitionViewer(monaco, mainEditor, libraryModels, option
     const key=uri.toString();
     if(!pendingSources.has(key))pendingSources.set(key,(async()=>{
       const file=uri.path.slice('/tetorica-runtime/'.length);
-      const response=await nativeFetch(new URL(`../js/${file}`,import.meta.url),{cache:'no-cache'});
+      const response=await nativeFetch(runtimeSourceUrl(file),{cache:'no-cache'});
       if(!response.ok)throw new Error(`HTTP ${response.status}: ${file}`);
       const text=await response.text();
       if(disposed)return null;

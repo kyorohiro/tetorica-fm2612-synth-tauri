@@ -59,17 +59,28 @@ UI の長い停止による欠音を完全に防ぐものではありません�
 
 ## Synth 本体を更新する
 
-手動で用意した **Synth の release ZIP** のパスを指定します。置き場所・名前は自由で、version 指定は不要です。
+手動で用意した **Synth の release ZIP** のパスを指定します。置き場所・名前は自由です。
+`--version X.Y.Z`を付けると、取り込みと同時にTauriアプリの版番号も変更できます。
 
 ```sh
-npm run import:release -- ./xxx.zip
+npm run import:release -- ./xxx.zip --version X.Y.Z
 npm test
 npm run dev
 ```
 
+`X.Y.Z`は今回のアプリ版（数字3区切り）へ置き換えます。ZIPのファイル名やWeb版番号とは独立です。
+省略した従来の`npm run import:release -- ./xxx.zip`は、アプリ版を変更しません。
+指定時は`package.json`、`package-lock.json`、`src-tauri/Cargo.toml`、
+`src-tauri/Cargo.lock`の自分のcrate、`src-tauri/tauri.conf.json`を揃えます。
+依存パッケージは更新せず、`release.lock.json`はWeb取り込み元の記録のままです。
+`--check`や`--record-local-changes`と`--version`は併用できません。
+リリース時は取り込み後に`sh deploy_mac.sh`等でビルドを確認してから、
+`dist/`、`release.lock.json`と上記5ファイルを最終commitへ含め、tagを作成します。
+取り込みコマンド自体はビルド・commit・tag・pushを実行しません。
+
 `index.html` と `synth.js` が ZIP のルートにある配布物を使います。
 `dist/` と `release.lock.json` を更新し、ZIP と各ファイルの SHA-256 を記録します。
-動作確認後、この2つを同じコミットに含めてください。ZIP は Git に含めません。
+動作確認後、取り込みで変更したファイルを同じコミットに含めてください。ZIP は Git に含めません。
 `dev` / `build` 前の検査では、取り込み原本と明示的に記録したローカル変更を照合します。
 
 ## ソースを編集・再利用する

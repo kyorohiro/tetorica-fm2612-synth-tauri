@@ -1,6 +1,7 @@
 """Import an unmodified Synth release; pin archive and extracted file hashes."""
 import argparse
 import hashlib
+import importlib.util
 import json
 import re
 from pathlib import Path, PurePosixPath
@@ -165,36 +166,74 @@ def check(root):
     return lock
 
 
-def import_release(root, archive):
+def prepare_app_version(root, version):
+    """Load this checkout's standalone metadata updater only when requested."""
+    spec = importlib.util.spec_from_file_location(
+        'tetorica_app_version', Path(__file__).with_name('app_version.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.prepare_version_update(root, version)
+
+
+def import_release(root, archive, version=None):
+    version_update = prepare_app_version(root, version) if version is not None else None
     if not archive.is_file():
         raise FileNotFoundError(f'Synth release ZIP not found: {archive}')
     sha = digest(archive.read_bytes())
     previous = root / 'release.lock.json'
-    old_lock = json.loads(previous.read_text()) if previous.exists() else {}
-    version = old_lock.get('version') if old_lock.get('sha256') == sha else f'sha256-{sha[:12]}'
+    old_lock_bytes = previous.read_bytes() if previous.exists() else None
+    old_lock = json.loads(old_lock_bytes) if old_lock_bytes is not None else {}
+    local_manifest = root / LOCAL_MANIFEST
+    old_local_bytes = local_manifest.read_bytes() if local_manifest.exists() else None
+    release_version = old_lock.get('version') if old_lock.get('sha256') == sha else f'sha256-{sha[:12]}'
     with tempfile.TemporaryDirectory(prefix='.import-', dir=root) as temporary:
         staging = Path(temporary) / 'dist'
         staging.mkdir()
         hashes = unpack(archive, staging)
-        lock = {'version': version, 'archive': archive.name, 'sha256': sha, 'files': hashes}
+        lock = {'version': release_version, 'archive': archive.name, 'sha256': sha, 'files': hashes}
         destination = root / 'dist'
-        if destination.exists():
-            destination.rename(Path(temporary) / 'previous-dist')
-        staging.rename(destination)
-        previous.write_text(json.dumps(lock, indent=2, sort_keys=True) + '\n')
-        (root / LOCAL_MANIFEST).unlink(missing_ok=True)
-    print(f'Imported {version}: {len(hashes)} files, SHA256 {sha}')
+        backup = Path(temporary) / 'previous-dist'
+        installed = False
+        try:
+            if destination.exists():
+                destination.rename(backup)
+            staging.rename(destination)
+            installed = True
+            previous.write_text(json.dumps(lock, indent=2, sort_keys=True) + '\n')
+            local_manifest.unlink(missing_ok=True)
+            if version_update is not None:
+                version_update.apply()
+        except BaseException:
+            # Metadata applies transactionally too. Restore the imported assets
+            # and provenance if either installation or the app update fails.
+            if installed:
+                shutil.rmtree(destination)
+            if backup.exists():
+                backup.rename(destination)
+            if old_lock_bytes is None:
+                previous.unlink(missing_ok=True)
+            else:
+                previous.write_bytes(old_lock_bytes)
+            if old_local_bytes is None:
+                local_manifest.unlink(missing_ok=True)
+            else:
+                local_manifest.write_bytes(old_local_bytes)
+            raise
+    print(f'Imported {release_version}: {len(hashes)} files, SHA256 {sha}')
+    if version_update is not None:
+        print(f'App version set to {version_update.version}')
     return lock
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('zip', nargs='?', type=Path, help='Path to the Synth release ZIP')
+    parser.add_argument('--version', help='Set the app version to X.Y.Z; independent of the ZIP filename')
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument('--check', action='store_true')
     actions.add_argument('--record-local-changes', action='store_true')
     args = parser.parse_args()
-    if (args.check or args.record_local_changes) and args.zip is not None:
+    if (args.check or args.record_local_changes) and (args.zip is not None or args.version is not None):
         parser.error('choose a ZIP import, --check, or --record-local-changes')
     if not args.check and not args.record_local_changes and args.zip is None:
         parser.error('provide the ZIP path: npm run import:release -- ./xxx.zip')
@@ -209,7 +248,7 @@ def main():
         elif args.record_local_changes:
             record_local_changes(ROOT)
         else:
-            import_release(ROOT, args.zip)
+            import_release(ROOT, args.zip, version=args.version)
     except (OSError, ValueError, zipfile.BadZipFile) as error:
         parser.error(str(error))
 
