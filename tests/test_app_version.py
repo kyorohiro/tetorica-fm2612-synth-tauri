@@ -134,7 +134,9 @@ class AppVersionTests(unittest.TestCase):
 
     def test_foreign_lock_bytes_and_crlf_are_preserved(self):
         path = self.root / 'src-tauri/Cargo.lock'
-        original = path.read_bytes().replace(b'\n', b'\r\n')
+        # Windows write_text fixtures already contain CRLF; normalize before
+        # making the byte-preservation fixture so CR never gets doubled.
+        original = path.read_bytes().replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
         path.write_bytes(original)
         versions.prepare_version_update(self.root, '2.0.0').apply()
         expected = original.replace(b'name = "fixture"\r\nversion = "1.2.3"',
