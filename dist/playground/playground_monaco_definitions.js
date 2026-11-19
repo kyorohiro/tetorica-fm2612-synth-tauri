@@ -9,6 +9,8 @@ export function definitionSource(text, position, chip = 'ym2612', options = {}) 
   const prefix = lines.slice(0, position?.startLineNumber ?? position?.lineNumber ?? 1).join('\n');
   const owners = [...prefix.matchAll(/^(?:declare\s+)?(?:interface|type)\s+(\w+)/gm)];
   const owner = owners.at(-1)?.[1] ?? '';
+  if (symbol === 'assembleScspDsp' || symbol === 'disassembleScspDsp')
+    return {file:'scsp_dsp_assembler.js',symbol};
   // Member names such as play/stop belong to their declared media interface,
   // before similarly named global music helpers are considered.
   if(owner==='SnesCodeClient'&&['noteOn','noteOff','getState','allNotesOff','dispose'].includes(symbol))
@@ -67,6 +69,7 @@ export function definitionSource(text, position, chip = 'ym2612', options = {}) 
   if (['hzToBlockFnum', 'createPitchFromMidi'].includes(symbol)) return {file:'pitch.js', symbol};
   if (['noteToBlockFnum', 'play', 'scale', 'chord', 'noteLerp'].includes(symbol)) return {file:'playground_music.js', symbol};
   if (/^Playground(?:Primary)?Ps1/.test(owner)||owner==='SpuCodeClient') return {file:'ps1synth.js',symbol:/^(?:Playground|SpuCodeClient)/.test(symbol)?'Ps1Synth':symbol};
+  if (/^Playground(?:Primary)?Scsp/.test(owner)) return {file:'scspsynth.js',symbol:owner==='PlaygroundScsp'&&!/^Playground/.test(symbol)?'ScspSynth.'+symbol:'ScspSynth'};
   if (/^PlaygroundNes$/.test(owner)) return {file:'nesapusynth.js', symbol};
   if (/^PlaygroundGameboy$/.test(owner)) return {file:'gameboysynth.js', symbol};
   if (/^Playground(?:Primary)?WonderSwan(?:TimelineBuilder)?$/.test(owner)) return {file:'wonderswansynth.js',symbol:/^Playground/.test(symbol)?'WonderSwanSynth':symbol};

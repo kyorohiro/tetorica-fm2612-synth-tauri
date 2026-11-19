@@ -1271,6 +1271,8 @@ type PlaygroundAPIBase = {
   prepareVabTone: typeof prepareVabTone;
   exportVab: typeof exportVab;
   MAX_VAB_FILE_BYTES: typeof MAX_VAB_FILE_BYTES;
+  assembleScspDsp: typeof assembleScspDsp;
+  disassembleScspDsp: typeof disassembleScspDsp;
   midi: PlaygroundMidi;
   /** Primary FM API for the selected mode. */
   fm: PlaygroundSelectedFm;
@@ -1940,6 +1942,32 @@ declare function prepareVabTone(bank:Ps1VabBank, toneNumber:number):Ps1VabPrepar
 /** Export the unchanged source bank returned by readVab, or one available Tone.
  * Preserves source ADPCM/metadata; edited or cloned banks must be reopened first. */
 declare function exportVab(bank:Ps1VabBank, options?:Ps1VabExportOptions):Uint8Array;
+/** Assemble provisional SCSP DSP field source locally into an independent
+ * Uint16Array of 512 logical MPRO words, four words per physical step.
+ * Decimal steps 0–127 increase strictly. Missing fields and positions are zero.
+ * Semicolons begin source comments. Validation errors report source lines.
+ * Pure synchronous helper, also available as pg.assembleScspDsp.
+ * Runs locally in JavaScript without WASM loading, audio setup or chip mutation.
+ * Run follows the selected mode's existing audio preparation lifecycle.
+ * The codec supports field source and RAW0–RAW3 inspection data. Synth execution
+ * uses a guarded profile, with coefficient setup and validation performed separately.
+ * @example
+ * const words = assembleScspDsp('003: EWT=1 COEF=1');
+ * console.table(Array.from(words));
+ */
+declare function assembleScspDsp(source:string):Uint16Array;
+/** Recover editable field source from a complete 512-word SCSP DSP image.
+ * Input words retain their values. Compact output includes internal zero steps
+ * through the last nonzero instruction. All-zero input produces an empty string.
+ * includeTrailingZeros emits all 128 physical positions. RAW fields preserve
+ * uninterpreted bits in existing instruction images for inspection and round trips.
+ * Pure synchronous helper, also available as pg.disassembleScspDsp.
+ * Runs locally in JavaScript without WASM loading, audio setup or chip mutation.
+ * @example
+ * const source = disassembleScspDsp(words, {includeTrailingZeros:true});
+ * console.log(source);
+ */
+declare function disassembleScspDsp(words:Uint16Array|readonly number[], options?:{includeTrailingZeros?:boolean}):string;
 interface PlaygroundBrrEncodeOptions {
   /** Null/omitted for one-shots. Loop start and source length must be multiples of 16. */
   loopStartSamples?:number | null;
@@ -2964,7 +2992,50 @@ interface PlaygroundScspMix {
   directLevel: number;
   /** Hardware DIPAN 0..31; 0 center, 15 right only, 31 left only. */
   pan: number;
+  /** Hardware IMXL 0..7; omitted/0 disables the send. Native requires 0. */
+  dspSend?: number;
+  /** Hardware ISEL input bus 0..1; omitted uses MIXS0. Web Audio only. */
+  dspInput?: number;
 }
+/** Signed Q12 hardware coefficient codes, each -4096..4095. */
+type PlaygroundScspDspCoefficientPatch = Partial<{0:number; 1:number; 2:number}>;
+interface PlaygroundScspDspCoefficients {codes:number[];}
+/** A setup update supplies every supported coefficient atomically. */
+interface PlaygroundScspDspApplyOptions {coefficients:{0:number; 1:number; 2:number};}
+interface PlaygroundScspDspReturn {
+  /** Selected EFREG0 / EFREG1 return level 0..7; 0 is muted. */
+  level:number;
+  /** Hardware EFPAN 0..31; 0 center, 15 right only, 31 left only. */
+  pan:number;
+}
+interface PlaygroundScspDspRam {address:number; byteLength:number;}
+interface PlaygroundScspDspDelaySettings {
+  enabled:boolean;
+  /** Integer milliseconds, 20..700 at the native 44.1 kHz rate. */
+  timeMs:number;
+  /** Realized signed COEF1 / 4096, -1..4095/4096. */
+  feedback:number;
+}
+type PlaygroundScspDspDelayPatch = Partial<PlaygroundScspDspDelaySettings>;
+interface PlaygroundScspDspProgramBase {
+  configured:boolean;
+  words:number[];
+  revision:number;
+  coefficients:PlaygroundScspDspCoefficients;
+  return:PlaygroundScspDspReturn;
+  /** Present after indexed return control; `return` is still output 0. */
+  returns?:[PlaygroundScspDspReturn,PlaygroundScspDspReturn];
+}
+/** Independent snapshots retain owned instruction and coefficient arrays. */
+interface PlaygroundScspDspRegisterProgram extends PlaygroundScspDspProgramBase {
+  profile:'ram-free';
+}
+interface PlaygroundScspDspDelayProgram extends PlaygroundScspDspProgramBase {
+  profile:'delay-ring';
+  delay:PlaygroundScspDspDelaySettings;
+  ram:PlaygroundScspDspRam;
+}
+type PlaygroundScspDspProgram = PlaygroundScspDspRegisterProgram | PlaygroundScspDspDelayProgram;
 interface PlaygroundScspLfo {
   frequencyCode: number;
   pitchWave: number;
@@ -2989,6 +3060,10 @@ interface PlaygroundScspState {
   nextSampleId: number;
   ramUsedBytes: number;
   ramFreeBytes: number;
+  /** Present after DSP state has been created; absent for untouched instruments. */
+  dsp?:PlaygroundScspDspProgram;
+  /** Managed ring reservation remains until reset({clearRam:true}). */
+  dspRam?:PlaygroundScspDspRam;
   playingSampleIds?: (number | null)[];
   samples: PlaygroundScspSample[];
   /** Authored presets; gate is the requested key state, not an activity meter. */
@@ -3008,6 +3083,44 @@ interface PlaygroundScsp {
   setFrequency(slot:number,hz:number):number;
   setNote(slot:number,note:string|number):number;
   setMix(slot:number,patch:Partial<PlaygroundScspMix>):void;
+  /** Apply a complete 512-word RAM-free DSP image and optional complete COEF0..2
+   * setup in audio-owner order. Rejects RAW bits, RAM I/O/address controls and
+   * unsupported coefficient/effect outputs before mutation. Allocates no RAM;
+   * retains samples, held voices and DSP TEMP history. Main/Worker Web Audio.
+   * Native rejects DSP methods with NotSupportedError. Pure assembly is separate.
+   * @example
+   * const words = assembleScspDsp('000: XSEL=1 YSEL=1 IRA=32 ZERO=1 COEF=0\n001: EWT=1 ZERO=1');
+   * await scsp.applyDspProgram(words, {coefficients:{0:2048,1:0,2:0}});
+   */
+  applyDspProgram(words:Uint16Array|readonly number[],options?:PlaygroundScspDspApplyOptions):Promise<PlaygroundScspDspRegisterProgram>;
+  /** Detached program/coefficients/return snapshot; no change to the audio owner. */
+  getDspProgram():Promise<PlaygroundScspDspProgram>;
+  getDspCoefficients():Promise<PlaygroundScspDspCoefficients>;
+  /** Partial signed COEF0..2 hardware codes, -4096..4095. Changes only coefficients;
+   * held voices and DSP TEMP history continue. This is not cutoff in Hz.
+   * @example
+   * await scsp.setDspCoefficients({1:3840,2:256});
+   */
+  setDspCoefficients(patch:PlaygroundScspDspCoefficientPatch):Promise<PlaygroundScspDspCoefficients>;
+  /** Legacy live EFREG0 return level/pan. Per-slot setMix({dspSend:7}) enables
+   * sends; dspInput selects MIXS0/1, directLevel controls the dry path. */
+  setDspReturn(patch:Partial<PlaygroundScspDspReturn>):Promise<PlaygroundScspDspReturn>;
+  /** Independent EFREG0 / EFREG1 return. Hardware pan 31 is left, 15 is right.
+   * @example
+   * await scsp.setDspReturn(0,{level:7,pan:31});
+   * await scsp.setDspReturn(1,{level:7,pan:15});
+   */
+  setDspReturn(output:0|1,patch:Partial<PlaygroundScspDspReturn>):Promise<PlaygroundScspDspReturn>;
+  /** Reserve a 64 KiB ring and apply the fixed SCSP Delay program. Time is
+   * 20..700 integer milliseconds. Feedback is quantized to signed Q12.
+   * Time / enabled edits clear the ring. Feedback edits preserve its tail.
+   * Send and return use setMix() / setDspReturn(). Main/Worker Web Audio.
+   * @example
+   * await scsp.setDspDelay({enabled:true,timeMs:240,feedback:.35});
+   * scsp.setMix(CH1,{dspSend:7});
+   * await scsp.setDspReturn({level:6});
+   */
+  setDspDelay(patch:PlaygroundScspDspDelayPatch):Promise<PlaygroundScspDspDelayProgram>;
   keyOn(slot:number):void;
   keyOff(slot:number):void;
   noteOn(slot:number,note:string|number):void;
