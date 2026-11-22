@@ -1,21 +1,28 @@
-/** FM2612's expanded workspace uses the existing tabs and performance controls. */
-export function setupSynthExpandedTabs({codeControls,selectChip}={}) {
-  if(!codeControls||typeof selectChip!=='function')throw TypeError('Expanded tabs need Code and chip view controls.');
+/** Expanded workspace reuses the existing tabs and performance controls. */
+export function setupSynthExpandedTabs({codeControls,selectChip,elements={},getChipView=button=>button.dataset.synthChip}={}) {
+  if(!codeControls||typeof selectChip!=='function'||['isCodeMode','isExpanded','setMode','setExpanded'].some(name=>typeof codeControls[name]!=='function'))throw TypeError('Expanded tabs need Code and chip view controls.');
+  if(!elements||typeof elements!=='object'||Array.isArray(elements)||Reflect.ownKeys(elements).some(key=>!['editor','chipTabs','volume'].includes(key))||typeof getChipView!=='function')throw TypeError('Expanded tabs need valid element overrides and a chip view callback.');
   const byId=id=>document.getElementById(id);
   const slot=byId('synthExpandedTabsSlot'),codeSlot=byId('synthExpandedCodeSlot');
-  const volumeSlot=byId('synthExpandedVolumeSlot'),volume=byId('masterVolumeRange')?.closest('.volume-control');
+  const volumeSlot=byId('synthExpandedVolumeSlot'),volume=Object.hasOwn(elements,'volume')?elements.volume:byId('masterVolumeRange')?.closest('.volume-control');
   const codeLayoutButton=byId('synthWorkspaceCodeButton'),synthLayoutButton=byId('synthWorkspaceSynthButton');
-  const editor=document.querySelector('#synthWorkspace .synth-editor');
+  const editor=Object.hasOwn(elements,'editor')?elements.editor:document.querySelector('#synthWorkspace .synth-editor');
   const codeTab=byId('synthInputCodeTab'),keyboardTab=byId('synthInputKeyboardTab');
-  const chipTabs=['synthChipTabYm2612','synthChipTabPsg','synthChipTabPcm','synthChipTabCdda','synthChipTabPwm','synthSongMixButton'].map(byId);
+  const chipTabs=Object.hasOwn(elements,'chipTabs')?elements.chipTabs:['synthChipTabYm2612','synthChipTabPsg','synthChipTabPcm','synthChipTabCdda','synthChipTabPwm','synthSongMixButton'].map(byId);
+  const element=node=>Boolean(node?.parentNode&&typeof node.setAttribute==='function'&&typeof node.append==='function');
+  if(volume!=null&&!element(volume))throw TypeError('Expanded Master needs an attached control.');
+  if(!element(editor)||!Array.isArray(chipTabs)||!chipTabs.length||new Set(chipTabs).size!==chipTabs.length||chipTabs.some(tab=>!element(tab)||tab.getAttribute('role')!=='tab'||tab===codeTab||tab===keyboardTab))throw TypeError('Expanded tabs need an attached editor and distinct chip tabs.');
   const tablist=chipTabs[0]?.parentNode,inputTablist=codeTab?.parentNode,inputHeading=inputTablist?.parentNode;
   const expand=byId('synthCodeExpandButton'),transport=byId('synthCodeRunButton')?.parentNode;
-  if([slot,codeSlot,editor,codeTab,keyboardTab,tablist,inputTablist,inputHeading,expand,transport,...chipTabs].some(node=>!node))throw TypeError('Expanded tabs need the FM2612 workspace.');
+  if([slot,codeSlot,codeTab,keyboardTab,tablist,inputTablist,inputHeading,expand,transport].some(node=>!node)||chipTabs.some(tab=>tab.parentNode!==tablist))throw TypeError('Expanded tabs need the Synth workspace and one chip tablist.');
+  const chipViews=new Map(chipTabs.map(tab=>[tab,getChipView(tab)]));
+  if([...chipViews.values()].some(view=>typeof view!=='string'||!view||['code','keyboard'].includes(view))||new Set(chipViews.values()).size!==chipTabs.length)throw TypeError('Expanded chip views must have distinct nonempty names.');
   const tabs=[codeTab,...chipTabs,keyboardTab],heading=document.createElement('div');
   heading.className='synth-expanded-heading';
   const oldLabel=tablist.getAttribute('aria-label'),oldHeadingHidden=inputHeading.hidden;
   const anchors=new Map();
-  const movable=[tablist,codeTab,keyboardTab,expand,transport,...(volumeSlot&&volume?[volume]:[])];
+  const sharedTransport=transport.dataset.codeTransport!=='panel';
+  const movable=[tablist,codeTab,keyboardTab,expand,...(sharedTransport?[transport]:[]),...(volumeSlot&&volume?[volume]:[])];
   for(const node of movable) {
     const anchor=document.createComment('Expanded workspace control');
     node.parentNode.insertBefore(anchor,node);anchors.set(node,anchor);
@@ -53,7 +60,8 @@ export function setupSynthExpandedTabs({codeControls,selectChip}={}) {
       currentView=codeControls.isCodeMode()?'code':'keyboard';
       tablist.insertBefore(codeTab,tablist.firstChild);tablist.append(keyboardTab);
       tablist.setAttribute('aria-label','Synth workspace');
-      heading.append(tablist,expand);slot.append(heading,transport);
+      heading.append(tablist,expand);slot.append(heading);
+      if(sharedTransport)slot.append(transport);
       if(volumeSlot&&volume){volumeSlot.append(volume);volumeSlot.hidden=false;}
       inputHeading.hidden=true;slot.hidden=false;
       update();
@@ -75,7 +83,7 @@ export function setupSynthExpandedTabs({codeControls,selectChip}={}) {
   function showChip(button) {
     if(disposed||!chipTabs.includes(button))return;
     currentChip=button;
-    if(expanded){currentView=button.dataset.synthChip;update();}
+    if(expanded){currentView=chipViews.get(button);update();}
   }
   function keydown(event) {
     if(!expanded||event.metaKey||event.ctrlKey||event.altKey)return;

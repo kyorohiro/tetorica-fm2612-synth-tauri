@@ -48,6 +48,12 @@ export function definitionSource(text, position, chip = 'ym2612', options = {}) 
     if(['parseNoteName','toPitch','midiToNoteName','lerp','choose','rand','rrange','randInt'].includes(symbol))return {file:'playground_music.js',symbol};
     if(symbol==='hzToBlockFnum')return {file:'soundchip_pitch.js',symbol:'opnPitchFromHz'};
   }
+  if(/^PlaygroundSid(?:OperationRecorder|OperationProgram|RecordedOperation|RecordedCalls)$/.test(owner))return {file:'sid_operations.js',symbol:'buildSidOperations'};
+  if(/^PlaygroundSid(?:StateSnapshot|OperationState)$/.test(owner))return {file:'sid_timed_state.js',symbol:'createSidTimedSnapshot'};
+  if(owner==='PlaygroundSidCompiledWrite')return {file:'sid_operations.js',symbol:'compileSidOperations'};
+  if(/^PlaygroundSid(?:CompileOptions|ScheduleOptions|ScheduleReceipt)$/.test(owner)||
+      ['PlaygroundSid','PlaygroundPrimarySid'].includes(owner)&&['build','compile','captureState','schedule','clearSchedule'].includes(symbol))
+    return symbol==='build'?{file:'sid_operations.js',symbol:'buildSidOperations'}:{file:'sid_timed_client.js',symbol:'attachSidTimedClient'};
   if (symbol === 'sid') return {file:'playground_sid.js',symbol:'createSidClient'};
   if (/^Playground(?:Primary)?Sid$/.test(owner) && ['readRegister','getState','setClock'].includes(symbol)) return {file:'playground_sid.js',symbol:'createSidRegisterClient'};
   if (/^Playground(?:Primary)?Sid/.test(owner)) return {file:'sidsynth.js',symbol:/^Playground/.test(symbol)?'SidSynth':symbol};
@@ -68,11 +74,36 @@ export function definitionSource(text, position, chip = 'ym2612', options = {}) 
   if (owner === 'PlaygroundSecondsTimeline') return {file:'playground_clock.js',symbol};
   if (['hzToBlockFnum', 'createPitchFromMidi'].includes(symbol)) return {file:'pitch.js', symbol};
   if (['noteToBlockFnum', 'play', 'scale', 'chord', 'noteLerp'].includes(symbol)) return {file:'playground_music.js', symbol};
+  if(/^PlaygroundPs1Operation(?:Program|Recorder)$/.test(owner))return {file:'ps1_operations.js',symbol:'buildPs1Operations'};
+  if(owner==='PlaygroundPs1StateSnapshot')return {file:'ps1_timed_state.js',symbol:'createPs1TimedSnapshot'};
+  if(owner==='PlaygroundPs1CompiledWrite')return {file:'ps1_operations.js',symbol:'compilePs1Operations'};
+  if(['PlaygroundPs1','PlaygroundPrimaryPs1','SpuCodeClient'].includes(owner)&&['build','compile','captureState','schedule','clearSchedule'].includes(symbol))
+    return symbol==='build'?{file:'ps1_operations.js',symbol:'buildPs1Operations'}:{file:'ps1_timed_client.js',symbol:'attachPs1TimedClient'};
   if (/^Playground(?:Primary)?Ps1/.test(owner)||owner==='SpuCodeClient') return {file:'ps1synth.js',symbol:/^(?:Playground|SpuCodeClient)/.test(symbol)?'Ps1Synth':symbol};
   if (/^Playground(?:Primary)?Scsp/.test(owner)) return {file:'scspsynth.js',symbol:owner==='PlaygroundScsp'&&!/^Playground/.test(symbol)?'ScspSynth.'+symbol:'ScspSynth'};
+  if(owner==='PlaygroundNesOperationRecorder')return ['atSample','atSeconds'].includes(symbol)?{file:'nes_operations.js',symbol:'buildNesOperations'}:{file:'nesapusynth.js',symbol};
+  if(owner==='PlaygroundNes'&&['build','compile','schedule','captureState','clearSchedule'].includes(symbol))return {file:'nes_timed_client.js',symbol:'attachNesTimedClient'};
   if (/^PlaygroundNes$/.test(owner)) return {file:'nesapusynth.js', symbol};
-  if (/^PlaygroundGameboy$/.test(owner)) return {file:'gameboysynth.js', symbol};
+  if(/^PlaygroundGameboy(?:OperationRecorder|OperationProgram|RecordedOperation)$/.test(owner))return {file:'gameboy_operations.js',symbol:'buildGameboyOperations'};
+  if(/^PlaygroundGameboy(?:StateSnapshot|OperationState)$/.test(owner))return {file:'gameboy_timed_state.js',symbol:'createGameboyTimedSnapshot'};
+  if(owner==='PlaygroundGameboyCompiledWrite')return {file:'gameboy_operations.js',symbol:'compileGameboyOperations'};
+  if(/^PlaygroundGameboy(?:CompileOptions|ScheduleOptions|ScheduleReceipt)$/.test(owner)||
+      ['PlaygroundGameboy','PlaygroundPrimaryGameboy','GameboyCodeClient'].includes(owner)&&['build','compile','captureState','schedule','clearSchedule'].includes(symbol))
+    return symbol==='build'?{file:'gameboy_operations.js',symbol:'buildGameboyOperations'}:{file:'gameboy_timed_client.js',symbol:'attachGameboyTimedClient'};
+  if (/^Playground(?:Primary)?Gameboy$/.test(owner)) return {file:'gameboysynth.js', symbol};
+  if(owner==='PlaygroundWonderSwanOperationRecorder'||owner==='PlaygroundWonderSwanOperationProgram')return {file:'wonderswan_operations.js',symbol:'buildWonderSwanOperations'};
+  if(owner==='PlaygroundWonderSwanStateSnapshot')return {file:'wonderswan_timed_state.js',symbol:'createWonderSwanTimedSnapshot'};
+  if(owner==='PlaygroundWonderSwanCompiledWrite')return {file:'wonderswan_operations.js',symbol:'compileWonderSwanOperations'};
+  if(['PlaygroundWonderSwan','PlaygroundPrimaryWonderSwan'].includes(owner)&&['build','compile','captureState','schedule','clearSchedule'].includes(symbol))
+    return symbol==='build'?{file:'wonderswan_operations.js',symbol:'buildWonderSwanOperations'}:{file:'wonderswan_timed_client.js',symbol:'attachWonderSwanTimedClient'};
   if (/^Playground(?:Primary)?WonderSwan(?:TimelineBuilder)?$/.test(owner)) return {file:'wonderswansynth.js',symbol:/^Playground/.test(symbol)?'WonderSwanSynth':symbol};
+  if(/^PlaygroundHuc6280(?:OperationRecorder|RecordedMethod|OperationTime|RecordedOperation|OperationProgram)$/.test(owner))
+    return {file:'huc6280_operations.js',symbol:'buildHuc6280Operations'};
+  if(owner==='PlaygroundHuc6280StateSnapshot'||owner==='PlaygroundHuc6280OperationState')return {file:'huc6280_timed_state.js',symbol:'createHuc6280TimedSnapshot'};
+  if(owner==='PlaygroundHuc6280CompiledWrite')return {file:'huc6280_operations.js',symbol:'compileHuc6280Operations'};
+  if(/^PlaygroundHuc6280(?:CompileOptions|ScheduleOptions|ScheduleReceipt)$/.test(owner)||
+      ['PlaygroundHuc6280','PlaygroundPrimaryHuc6280','Huc6280CodeClient'].includes(owner)&&['build','compile','captureState','schedule','clearSchedule'].includes(symbol))
+    return symbol==='build'?{file:'huc6280_operations.js',symbol:'buildHuc6280Operations'}:{file:'huc6280_timed_client.js',symbol:'attachHuc6280TimedClient'};
   if(owner==='Huc6280CodeClient'&&['getState','noteOn','noteOff','dispose'].includes(symbol))
     return {file:'synth-huc6280/instrument.js',symbol:{getState:'observeCode',noteOn:'_liveNoteOn',noteOff:'noteOff',dispose:'stop'}[symbol]};
   if(/^Playground(?:Primary)?Huc6280/.test(owner)||owner==='Huc6280CodeClient')
@@ -83,8 +114,28 @@ export function definitionSource(text, position, chip = 'ym2612', options = {}) 
   if (/^PlaygroundSpc$/.test(owner)) return {file:'playground_spc.js', symbol};
   if (/^PlaygroundYm2608$/.test(owner)) return {file:'ym2608synth.js', symbol};
   if (/^PlaygroundRf5c164$/.test(owner)) return {file:'rf5c164synth.js', symbol};
+  for (const [prefix, file, build, compile, snapshot, attach, aliases] of [
+    ['PlaygroundSegaPsg', 'segapsg', 'buildPsgOperations', 'compilePsgOperations', 'createPsgTimedSnapshot', 'attachPsgTimedClient', ['SmsGearPsg']],
+    ['PlaygroundYm2413', 'ym2413', 'buildOpllOperations', 'compileOpllOperations', 'createOpllTimedSnapshot', 'attachOpllTimedClient', ['PlaygroundPrimaryYm2413', 'SmsGearOpll']],
+  ]) {
+    if (owner === prefix + 'OperationProgram' || owner === prefix + 'OperationRecorder' || owner === prefix + 'BuildOptions')
+      return {file:file + '_operations.js', symbol:build};
+    if (owner === prefix + 'StateSnapshot') return {file:file + '_timed_state.js', symbol:snapshot};
+    if (owner === prefix + 'CompiledWrite') return {file:file + '_operations.js', symbol:compile};
+    if (owner === prefix + 'TimedApi' || [prefix, ...aliases].includes(owner) && ['build','compile','captureState','schedule','clearSchedule'].includes(symbol))
+      return symbol === 'build' ? {file:file + '_operations.js', symbol:build} : {file:file + '_timed_client.js', symbol:attach};
+  }
   if (/^(?:PlaygroundSegaPsg|PSGApi)$/.test(owner)) return {file:'segapsgsynth.js', symbol};
   if (/^Playground(?:Primary)?(?:Opll|Ym2413)/.test(owner)) return {file:'ym2413synth.js',symbol:/^Playground/.test(symbol) ? 'YM2413Synth' : symbol};
+  if (owner === 'PlaygroundYm2608RhythmRecorder' || owner === 'PlaygroundYm2608AdpcmRecorder') return {file:'ym2608synth.js',symbol};
+  if (owner === 'PlaygroundYm2608SsgRecorder') return {file:'ssgsynth.js',symbol};
+  if (owner === 'PlaygroundYm2608OperationRecorder' || /^PlaygroundYm2608(?:BuildOptions|OperationProgram)$/.test(owner))
+    return {file:'ym2608_operations.js',symbol:'buildYm2608Operations'};
+  if (owner === 'PlaygroundYm2608StateSnapshot') return {file:'ym2608_timed_state.js',symbol:'createYm2608TimedSnapshot'};
+  if (owner === 'PlaygroundYm2608CompiledWrite') return {file:'ym2608_operations.js',symbol:'compileYm2608Operations'};
+  if (/^PlaygroundYm2608(?:TimedApi|CompileOptions|ScheduleOptions|ScheduleReceipt)$/.test(owner) ||
+      ['YM2608FMApi','PlaygroundYm2608','Fm2608CodeClient'].includes(owner) && ['build','compile','captureState','schedule','clearSchedule'].includes(symbol))
+    return symbol === 'build' ? {file:'ym2608_operations.js',symbol:'buildYm2608Operations'} : {file:'ym2608_timed_client.js',symbol:'attachYm2608TimedClient'};
   if (owner === 'PlaygroundYm2612OperationRecorder' || /^PlaygroundYm2612(?:BuildOptions|OperationProgram)$/.test(owner))
     return {file:'ym2612_operations.js',symbol:'buildYm2612Operations'};
   if (owner === 'PlaygroundYm2612StateSnapshot') return {file:'ym2612_timed_state.js',symbol:'createYm2612TimedSnapshot'};

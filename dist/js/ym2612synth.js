@@ -1,6 +1,6 @@
 import {noteToHz, opnPitchFromHz} from './soundchip_pitch.js';
 import {YM2612Dac, YM2612DacPlayer} from "./ym2612_dac.js";
-import {createYm2612OperationResetState, validateYm2612OperationState, observeYm2612OperationWrite} from './ym2612_operation_state.js';
+import {createYm2612OperationResetState, validateYm2612OperationState, observeYm2612OperationWrite} from './ym2612_operation_state.js?v=audio-stability-2';
 /**
  * @file ym2612synth.js
  * 実行環境: Browser / Node.js
@@ -399,6 +399,10 @@ export class YM2612WorkletTransport {
 
   clearScheduledWrites() {
     this.node.port.postMessage({ type: "clear-scheduled-writes" });
+  }
+
+  _releaseTimedNotes() {
+    if (!this.disposed) this.node.port.postMessage({type:'release-timed-notes'});
   }
 
   loadDacBank(name, bytes) {
@@ -930,7 +934,8 @@ export class YM2612Synth {
     }
 
     const operatorMask = buildKeyOperatorMask(operators);
-    this._write(0, 0x28, operatorMask | KEY_CHANNEL_CODES[channel]);
+    const held = this._timedState.keyMasks[channel] << 4;
+    this._write(0, 0x28, (held & ~operatorMask) | KEY_CHANNEL_CODES[channel]);
   }
 
   /** Note name or integer MIDI plus KEY ON. @overload @param {number} channel @param {string|number} note @returns {void} */
